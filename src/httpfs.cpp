@@ -206,12 +206,14 @@ static string FormatHTTPDate(timestamp_t timestamp) {
 	return StrfTimeFormat::Format(timestamp, "%a, %d %h %Y %H:%M:%S GMT");
 }
 
-// RFC 7232 §2.3: an ETag is "strong" iff it does not start with the "W/" prefix.
-// RFC 9110 §13.1.1 says servers MUST use strong comparison for If-Match — a weak ETag in
-// If-Match would never satisfy strong comparison, so we use If-Unmodified-Since for weak
-// ETags instead.
+// RFC 7232 §2.3: an ETag is `W/` `"..."` (weak) or `"..."` (strong) — a minimum
+// well-formed value is two characters. RFC 9110 §13.1.1 says servers MUST use
+// strong comparison for If-Match, so a weak ETag in If-Match would never
+// satisfy the comparison; we use If-Unmodified-Since for weak ETags instead.
+// A malformed (< 2 chars) value is treated as not-strong so we fall through
+// to the date-based precondition rather than sending a junk If-Match header.
 static bool IsStrongEtag(const string &etag) {
-	return !etag.empty() && !(etag.size() >= 2 && etag[0] == 'W' && etag[1] == '/');
+	return etag.size() >= 2 && !(etag[0] == 'W' && etag[1] == '/');
 }
 
 // Add the conditional-read precondition headers to a request for an HTTPFileHandle, if a
