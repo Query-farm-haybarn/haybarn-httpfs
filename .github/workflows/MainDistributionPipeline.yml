@@ -1,9 +1,12 @@
 #
-# This workflow calls the main distribution pipeline from DuckDB to build, test and (optionally) release the extension
+# Haybarn build-fork: calls the HAYBARN-FORK distribution pipeline (not upstream
+# duckdb/extension-ci-tools) so the build picks up Haybarn's R2-backed ccache,
+# pre-built GHCR images, and 4.13.6 toolchain. override_duckdb_repository
+# points the clone at the Haybarn engine.
 #
 name: Main Extension Distribution Pipeline
 on:
-  push:
+  # push:  # Haybarn: disabled — built via core engine haybarn-extensions.yml SHA pin
   pull_request:
   workflow_dispatch:
 
@@ -14,30 +17,34 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@92e134fc6844c138f2f6f3c10b3b88e112f334e0
+    secrets:
+      vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
       extension_name: httpfs
       duckdb_version: 0fab542c84ca94657616e519cd679334dcbd86b1
-      ci_tools_version: v1.5-variegata
+      ci_tools_version: 92e134fc6844c138f2f6f3c10b3b88e112f334e0
+      override_duckdb_repository: 'https://github.com/Query-farm-haybarn/haybarn'
+      override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
 
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_deploy.yml@v1.5-variegata
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@92e134fc6844c138f2f6f3c10b3b88e112f334e0
     secrets: inherit
     with:
       extension_name: httpfs
       duckdb_version: 0fab542c84ca94657616e519cd679334dcbd86b1
-      ci_tools_version: v1.5-variegata
+      ci_tools_version: 92e134fc6844c138f2f6f3c10b3b88e112f334e0
       deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
-      deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
+      deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/haybarn' }}
 
   code-quality:
     name: Code Quality
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@92e134fc6844c138f2f6f3c10b3b88e112f334e0
     with:
       extension_name: httpfs
       duckdb_version: 0fab542c84ca94657616e519cd679334dcbd86b1
-      ci_tools_version: v1.5-variegata
+      ci_tools_version: 92e134fc6844c138f2f6f3c10b3b88e112f334e0
       extra_toolchains: 'python3'
       format_checks: 'format'
