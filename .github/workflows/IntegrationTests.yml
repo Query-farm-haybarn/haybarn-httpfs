@@ -1,11 +1,19 @@
+# Haybarn: push trigger removed — this standalone test workflow doesn't gate any
+# production artifact; the core engine's haybarn-extensions.yml is the canonical builder.
 name: Integration Tests
-on: [push, pull_request,repository_dispatch]
+on:
+  pull_request:
+  repository_dispatch:
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
   cancel-in-progress: true
 defaults:
   run:
     shell: bash
+
+env:
+  X_VCPKG_ASSET_SOURCES: 'clear;x-azurl,https://haybarn-vcpkg-cache.rusty-bb6.workers.dev/assets/,,read'
 
 jobs:
   linux-tests-httpfs:
