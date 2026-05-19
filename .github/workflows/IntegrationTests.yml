@@ -26,9 +26,6 @@ jobs:
       VCPKG_TARGET_TRIPLET: x64-linux
       PYTHON_HTTP_SERVER_URL: http://localhost:8008
       PYTHON_HTTP_SERVER_DIR: /tmp/python_test_server
-      COMPRESSION_TEST_SERVER_URL: http://localhost:8009
-      COMPRESSION_TEST_SERVER_DIR: /tmp/python_compression_test_server
-      COMPRESSION_TEST_SERVER_PORT: 8009
 
     steps:
       - uses: actions/checkout@v4
@@ -72,12 +69,6 @@ jobs:
           mkdir -p $PYTHON_HTTP_SERVER_DIR
           cd $PYTHON_HTTP_SERVER_DIR
           python3 -m http.server 8008 &
-
-      - name: Run compression test server
-        shell: bash
-        run: |
-          mkdir -p $COMPRESSION_TEST_SERVER_DIR
-          python3 ./scripts/run_compression_test_server.py &
 
       - name: Build
         shell: bash
