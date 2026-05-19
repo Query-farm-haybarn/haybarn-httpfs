@@ -6,7 +6,12 @@
 #
 name: Main Extension Distribution Pipeline
 on:
-  # push:  # Haybarn: disabled — built via core engine haybarn-extensions.yml SHA pin
+  push:
+    # Only the haybarn integration branch publishes. PRs build via the
+    # pull_request trigger below but skip deploy (the deploy_versioned
+    # condition matches on github.ref == 'refs/heads/haybarn' only).
+    branches:
+      - haybarn
   pull_request:
   workflow_dispatch:
 
@@ -17,34 +22,50 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@92e134fc6844c138f2f6f3c10b3b88e112f334e0
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@5949d2c1c6b118df0b9560b37cd8f81adb2207db
     secrets:
       vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
       extension_name: httpfs
-      duckdb_version: 0fab542c84ca94657616e519cd679334dcbd86b1
-      ci_tools_version: 92e134fc6844c138f2f6f3c10b3b88e112f334e0
+      duckdb_version: haybarn-v1.5.2-rc13
+      ci_tools_version: haybarn
       override_duckdb_repository: 'https://github.com/Query-farm-haybarn/haybarn'
       override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
+      # Use the pre-built Haybarn Docker images from GHCR instead of doing
+      # a ~5-8 min inline `docker build` on every leg. The images already
+      # have vcpkg, the toolchain, and ccache 4.13.6 baked in.
+      #   ghcr.io/query-farm-haybarn/haybarn-<arch>-base:v1.5.2          (linux)
+      #   ghcr.io/query-farm-haybarn/haybarn-wasm-base:v1.5.2            (wasm)
+      use_prebuilt_images: true
+      use_prebuilt_wasm_image: true
 
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@92e134fc6844c138f2f6f3c10b3b88e112f334e0
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@5949d2c1c6b118df0b9560b37cd8f81adb2207db
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: 0fab542c84ca94657616e519cd679334dcbd86b1
-      ci_tools_version: 92e134fc6844c138f2f6f3c10b3b88e112f334e0
-      deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
+      duckdb_version: haybarn-v1.5.2-rc13
+      ci_tools_version: haybarn
+      override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
+      # Push-to-haybarn writes BOTH the versioned CalVer path AND the rolling-
+      # latest pointer. Versioned for reproducibility/pinning; latest so
+      # `INSTALL httpfs FROM haybarn` resolves the just-published binary
+      # without needing a separate alias-update step.
+      deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/haybarn' }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/haybarn' }}
+      # CalVer + haybarn-tag normalization + Cache-Control fix-up are handled
+      # by the reusable workflow's calver-deploy composite action — no per-
+      # extension wrapper needed.
 
   code-quality:
     name: Code Quality
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@92e134fc6844c138f2f6f3c10b3b88e112f334e0
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@5949d2c1c6b118df0b9560b37cd8f81adb2207db
     with:
       extension_name: httpfs
-      duckdb_version: 0fab542c84ca94657616e519cd679334dcbd86b1
-      ci_tools_version: 92e134fc6844c138f2f6f3c10b3b88e112f334e0
+      duckdb_version: haybarn-v1.5.2-rc13
+      ci_tools_version: haybarn
+      override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
       extra_toolchains: 'python3'
       format_checks: 'format'
