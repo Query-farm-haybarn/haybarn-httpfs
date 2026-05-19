@@ -196,6 +196,43 @@ static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &head
 	}
 }
 
+// Format a timestamp as an RFC 7231 IMF-fixdate string (e.g. "Wed, 21 Oct 2015 07:28:00 GMT").
+// Used for the If-Unmodified-Since precondition when only Last-Modified is cached.
+// timestamp_t is UTC microseconds-since-epoch; "GMT" is hardcoded since HTTP-date is always GMT.
+static string FormatHTTPDate(timestamp_t timestamp) {
+	return StrfTimeFormat::Format(timestamp, "%a, %d %h %Y %H:%M:%S GMT");
+}
+
+// RFC 7232 §2.3: an ETag is "strong" iff it does not start with the "W/" prefix.
+// RFC 9110 §13.1.1 says servers MUST use strong comparison for If-Match — a weak ETag in
+// If-Match would never satisfy strong comparison, so we use If-Unmodified-Since for weak
+// ETags instead.
+static bool IsStrongEtag(const string &etag) {
+	return !etag.empty() && !(etag.size() >= 2 && etag[0] == 'W' && etag[1] == '/');
+}
+
+// Add the conditional-read precondition headers to a request for an HTTPFileHandle, if a
+// validator is cached. Servers that honor the precondition return 412 Precondition Failed
+// on mismatch (RFC 9110 §13.1.1 / §13.1.4); servers that don't support these headers ignore
+// them harmlessly. Returns true iff at least one precondition header was added (so the
+// caller can decide whether to treat 412 as "file changed" or pass it through). When
+// unsafe_disable_etag_checks is set, no precondition is added.
+static bool AddConsistencyPreconditions(const HTTPFileHandle &hfh, HTTPHeaders &header_map) {
+	if (hfh.http_params.unsafe_disable_etag_checks) {
+		return false;
+	}
+	bool added = false;
+	if (IsStrongEtag(hfh.etag)) {
+		header_map.Insert("If-Match", hfh.etag);
+		added = true;
+	} else if (hfh.last_modified.value > 0) {
+		// Weak ETag or no ETag at all → use the date-based precondition (RFC 9110 §13.1.4).
+		header_map.Insert("If-Unmodified-Since", FormatHTTPDate(hfh.last_modified));
+		added = true;
+	}
+	return added;
+}
+
 static void AddHandleHeaders(HTTPFSParams &http_params, HTTPHeaders &header_map) {
 	// Inject headers from the http param extra_headers into the request
 	for (auto &header : http_params.extra_headers) {
@@ -209,6 +246,31 @@ static string StripETagQuotes(const string &etag) {
 		return etag.substr(1, etag.size() - 2);
 	}
 	return etag;
+}
+
+// Haybarn: translate a 412 Precondition Failed — the server's verdict on the If-Match /
+// If-Unmodified-Since headers AddConsistencyPreconditions attached — into a clear "remote
+// file changed" error, and drop the stale metadata-cache entry. Any other failure falls
+// through to `base_error`.
+//
+// Upstream routes every status >= 400 through the RunGetRequest / RunGetRangeRequest
+// `get_error` callback, so wrapping that callback keeps the whole Haybarn conditional-read
+// delta in the public request wrappers and leaves the shared runners byte-identical to
+// upstream — which is what keeps this stack cheap to rebase.
+static HTTPException MakeConsistencyAwareError(const HTTPResponse &response, bool sent_precondition, const string &path,
+                                               HTTPMetadataCache *metadata_cache, const char *retry_advice,
+                                               const std::function<HTTPException(const HTTPResponse &)> &base_error) {
+	if (sent_precondition && response.status == HTTPStatusCode::PreconditionFailed_412) {
+		if (metadata_cache) {
+			metadata_cache->Erase(path);
+		}
+		return HTTPException(response,
+		                     "Remote file \"%s\" appears to have changed: the server rejected our If-Match / "
+		                     "If-Unmodified-Since precondition with 412 Precondition Failed.\n%sYou can disable "
+		                     "conditional reads via `SET unsafe_disable_etag_checks = true;`",
+		                     path, retry_advice);
+	}
+	return base_error(response);
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::RunHeadRequest(string url, HTTPHeaders header_map, HTTPFSParams &http_params,
@@ -247,6 +309,9 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, stri
 	GetRequestInfo get_request(
 	    url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
+		    // Haybarn: a 412 from our conditional-read precondition is >= 400, so it reaches
+		    // get_error like any other failure. The caller's get_error callback turns it into
+		    // the "remote file changed" message (see MakeConsistencyAwareError).
 		    if (static_cast<int>(response.status) >= 400) {
 			    throw get_error(response);
 		    }
@@ -296,6 +361,9 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 	GetRequestInfo get_request(
 	    url, header_map, http_params,
 	    [&](const HTTPResponse &response) {
+		    // Haybarn: a 412 from our conditional-read precondition is >= 400, so it reaches
+		    // get_error like any other failure. The caller's get_error callback turns it into
+		    // the "remote file changed" message (see MakeConsistencyAwareError).
 		    if (static_cast<int>(response.status) >= 400) {
 			    throw get_error(response);
 		    }
@@ -391,11 +459,31 @@ unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, string 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
 	AddHandleHeaders(hfh.http_params, header_map);
 
+	// Haybarn conditional probe: if we already have a validator cached for this handle (i.e.
+	// this is a re-probe rather than the initial open), ask the server to enforce "still the
+	// same resource" via If-Match / If-Unmodified-Since. The first HEAD at file open has no
+	// cached validator and skips the conditional.
+	const bool sent_precondition = AddConsistencyPreconditions(hfh, header_map);
+
 	auto http_client = hfh.GetClient();
 	auto response = RunHeadRequest(url, header_map, hfh.http_params, [&](BaseRequest &request) {
 		return hfh.http_params.http_util.Request(request, http_client);
 	});
 	hfh.StoreClient(std::move(http_client));
+
+	// RunHeadRequest has no error callback — it hands the response back — so the precondition
+	// verdict is checked here rather than via MakeConsistencyAwareError.
+	if (sent_precondition && response && response->status == HTTPStatusCode::PreconditionFailed_412) {
+		if (global_metadata_cache) {
+			global_metadata_cache->Erase(handle.path);
+		}
+		throw HTTPException(*response,
+		                    "Remote file \"%s\" appears to have changed: the server rejected our If-Match / "
+		                    "If-Unmodified-Since precondition with 412 Precondition Failed.\nYou can disable "
+		                    "conditional reads via `SET unsafe_disable_etag_checks = true;`",
+		                    handle.path);
+	}
+
 	return response;
 }
 
@@ -428,10 +516,19 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
 	AddHandleHeaders(hfh.http_params, header_map);
 
+	// Haybarn conditional read: send If-Match / If-Unmodified-Since so mid-read mutations
+	// surface as 412 Precondition Failed. GetRequest is the full-file-GET fallback used when
+	// Range isn't supported; consistency-checking still applies.
+	const bool sent_precondition = AddConsistencyPreconditions(hfh, header_map);
+
 	auto http_client = hfh.GetClient();
 	auto response = RunGetRequest(
 	    hfh, url, header_map, hfh.http_params,
-	    [&](const HTTPResponse &response) { return GetHTTPError(handle, response, url); },
+	    [&](const HTTPResponse &response) {
+		    return MakeConsistencyAwareError(
+		        response, sent_precondition, handle.path, global_metadata_cache.get(), "",
+		        [&](const HTTPResponse &r) { return GetHTTPError(handle, r, url); });
+	    },
 	    [&](BaseRequest &request) { return hfh.http_params.http_util.Request(request, http_client); });
 	hfh.StoreClient(std::move(http_client));
 	return response;
@@ -443,10 +540,26 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
 	AddHandleHeaders(hfh.http_params, header_map);
 
+	// Haybarn conditional read: ask the server to enforce "this is still the same resource" via
+	// If-Match (strong ETag) or If-Unmodified-Since (Last-Modified). Mismatch produces 412 at
+	// the protocol level — unambiguous, server-arbitrated, and unaffected by representation
+	// flux (weak/strong ETag variants, gzip/identity). Servers that don't support these headers
+	// ignore them; the Content-Length vs buffer_out_len check in RunGetRangeRequest still
+	// handles the "server doesn't support Range" fallback. unsafe_disable_etag_checks bypasses
+	// the precondition.
+	const bool sent_precondition = AddConsistencyPreconditions(hfh, header_map);
+
 	auto http_client = hfh.GetClient();
 	auto response = RunGetRangeRequest(
 	    hfh, url, header_map, hfh.http_params, hfh.etag, hfh.auto_fallback_to_full_file_download, file_offset,
-	    buffer_out, buffer_out_len, [&](const HTTPResponse &response) { return GetHTTPError(handle, response, url); },
+	    buffer_out, buffer_out_len,
+	    [&](const HTTPResponse &response) {
+		    return MakeConsistencyAwareError(
+		        response, sent_precondition, handle.path, global_metadata_cache.get(),
+		        "For parquet or similar single-table sources, retry the query; for persistent "
+		        "file handles such as databases, `DETACH` and re-`ATTACH`.\n",
+		        [&](const HTTPResponse &r) { return GetHTTPError(handle, r, url); });
+	    },
 	    [&](BaseRequest &request) { return hfh.http_params.http_util.Request(request, http_client); });
 	hfh.StoreClient(std::move(http_client));
 	return response;

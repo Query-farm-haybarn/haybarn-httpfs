@@ -36,3 +36,61 @@ Some tests querying remote resources can be run already without further setup:
 ./build/release/test/unittest
 ```
 Further integration testing uses a local MinIO setup using Docker. See the [testing documentation for more information on how to set this up locally](test).
+
+## Response-side compression (`Accept-Encoding`)
+
+The default `curl` client transparently handles compressed HTTP responses
+(gzip, deflate, brotli, zstd — whichever encodings the bundled libcurl was
+built with) on every method except `HEAD` and Range `GET`. This benefits
+API workloads that exchange compressible payloads (S3 LIST XML, HuggingFace
+JSON, multipart-complete responses) with gzip- or zstd-capable endpoints.
+
+Per-method policy:
+
+| Method            | `Accept-Encoding`     | Why                                                                                                  |
+|-------------------|-----------------------|------------------------------------------------------------------------------------------------------|
+| Range `GET`       | `identity`            | RFC 9110 §14.1.2: `Content-Range` applies to the encoded sequence, so encoded Range bytes don't match the object. |
+| `HEAD`            | `identity`            | The response `Content-Length` is used as the file size; an encoded HEAD reports the wire size, not the object size. |
+| Non-Range `GET`   | negotiate             | API calls and full-file fallback reads. Curl decodes transparently.                                  |
+| `POST` / `PUT` / `DELETE` | negotiate     | Outside the file-read lifecycle. Response bodies (S3 multipart complete, etc.) benefit from compression. |
+
+Caller-supplied `Accept-Encoding` headers are always stripped — the curl client
+owns this policy. Range and HEAD responses are validated to be identity-encoded;
+any non-identity `Content-Encoding` is rejected with a clear error rather than
+delivered to the caller.
+
+The optional `httplib` client (`SET httpfs_client_implementation = 'httplib'`)
+is **identity-only on every request**. The bundled `duckdb_httplib` does not
+reliably decode brotli/zstd, so the httplib path forces
+`Accept-Encoding: identity` and rejects any non-identity `Content-Encoding`
+response. Workloads that want response compression should use the default
+`curl` client.
+
+## Conditional reads (`If-Match` / `If-Unmodified-Since`)
+
+To detect mid-read mutations of remote files (e.g. an S3 object rewritten
+between the parquet footer read and the row-group reads), the curl client
+sends an HTTP precondition on every request that follows a successful HEAD
+or GET on the same file handle:
+
+- **Strong ETag cached** → `If-Match: <etag>` (RFC 9110 §13.1.1).
+- **Only a weak ETag or Last-Modified cached** → `If-Unmodified-Since: <date>`
+  (RFC 9110 §13.1.4). RFC 9110 §13.1.1 requires strong comparison for
+  `If-Match`, which weak ETags never satisfy, so we use the date-based
+  precondition instead.
+
+If the precondition fails the server returns `412 Precondition Failed`, which
+the client surfaces as a clear "remote file changed" error rather than feeding
+stale-or-corrupt bytes to the parquet/CSV reader. Server-side enforcement
+replaces the previous client-side ETag string comparison, which had a long
+tail of representation-mismatch bugs (weak vs strong ETag flavors, gzip vs
+identity ETag variants, quoting inconsistencies across S3-compatible vendors).
+
+Servers that don't honor preconditions on GetObject silently ignore the headers
+and return `200`/`206` as usual. Range support is detected independently via
+the existing `Content-Length` vs request-length check, which falls back to a
+full-file download when the server doesn't speak Range.
+
+`SET unsafe_disable_etag_checks = true;` bypasses precondition enforcement
+entirely — the client sends no `If-Match` / `If-Unmodified-Since` and trusts
+whatever the server returns.
