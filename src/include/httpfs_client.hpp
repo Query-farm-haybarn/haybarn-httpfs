@@ -56,6 +56,17 @@ struct HTTPFSParams : public HTTPParams {
 
 	// Additional fields needs to be appended at the end and need to be propagated to duckdb-wasm
 	// TODO: make this unnecessary
+
+	// HTTP version preference for the curl client. Values: "auto" (default —
+	// HTTP/2 over TLS via ALPN, falls back to 1.1 if peer doesn't negotiate
+	// h2), "1.1" (force HTTP/1.1), "2.0" (force HTTP/2, fail if peer rejects).
+	// Honored by HTTPFSCurlClient; ignored by httplib (1.1-only) and wasm.
+	string http_version {"auto"};
+	// When true, the curl client enables CURLOPT_VERBOSE so libcurl prints
+	// protocol-level details (TLS handshake, ALPN selection, HTTP/2 frame log)
+	// to stderr. Useful for verifying HTTP/2 negotiation in production without
+	// running tcpdump; off by default.
+	bool curl_verbose {false};
 };
 
 class HTTPClientConnectionCache {
