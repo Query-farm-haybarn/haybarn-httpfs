@@ -63,6 +63,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
 	FileOpener::TryGetCurrentSetting(opener, "http_version", result->http_version, info);
 	FileOpener::TryGetCurrentSetting(opener, "httpfs_curl_verbose", result->curl_verbose, info);
+	FileOpener::TryGetCurrentSetting(opener, "http2_multiplex", result->http2_multiplex, info);
 
 	{
 		auto db = FileOpener::TryGetDatabase(opener);

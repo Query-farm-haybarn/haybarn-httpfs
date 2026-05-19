@@ -67,6 +67,13 @@ struct HTTPFSParams : public HTTPParams {
 	// to stderr. Useful for verifying HTTP/2 negotiation in production without
 	// running tcpdump; off by default.
 	bool curl_verbose {false};
+	// When true, route curl easy handles through a process-global curl_multi
+	// dispatcher. Per libcurl docs, CURLOPT_PIPEWAIT is a no-op for
+	// curl_easy_perform — true HTTP/2 stream multiplexing across worker threads
+	// requires curl_multi. With multiplex on, N parallel range reads from N
+	// worker threads share ONE TCP+TLS connection per peer via N H/2 streams.
+	// Off by default (Phase 2 of HTTP/2 work; opt-in until proven in production).
+	bool http2_multiplex {false};
 };
 
 class HTTPClientConnectionCache {

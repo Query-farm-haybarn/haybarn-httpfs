@@ -20,12 +20,20 @@ public:
 	operator CURL *() {
 		return curl;
 	}
-	CURLcode Execute() {
-		return curl_easy_perform(curl);
+	// When `use_multi_dispatch` is true the caller has opted into HTTP/2
+	// stream multiplexing — Execute() dispatches via the process-global
+	// curl_multi handle instead of curl_easy_perform. The multi path is
+	// synchronous from the caller's POV (blocks until the transfer
+	// completes) so call sites don't need to change.
+	CURLcode Execute();
+
+	void SetUseMultiDispatch(bool value) {
+		use_multi_dispatch = value;
 	}
 
 private:
 	CURL *curl = NULL;
+	bool use_multi_dispatch = false;
 };
 
 class CURLRequestHeaders {
