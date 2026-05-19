@@ -72,8 +72,10 @@ struct HTTPFSParams : public HTTPParams {
 	// curl_easy_perform — true HTTP/2 stream multiplexing across worker threads
 	// requires curl_multi. With multiplex on, N parallel range reads from N
 	// worker threads share ONE TCP+TLS connection per peer via N H/2 streams.
-	// Off by default (Phase 2 of HTTP/2 work; opt-in until proven in production).
-	bool http2_multiplex {false};
+	// On by default: graceful degradation on H/1.1 peers (multi opens a normal
+	// connection pool, no regression vs easy interface) and the H/2 win is
+	// large enough that opt-in would leave it dead-code in practice.
+	bool http2_multiplex {true};
 };
 
 class HTTPClientConnectionCache {
