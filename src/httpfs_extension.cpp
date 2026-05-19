@@ -114,6 +114,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          Value(50));
 	config.AddExtensionOption("unsafe_disable_etag_checks", "Disable checks on ETag consistency", LogicalType::BOOLEAN,
 	                          Value(false));
+	config.AddExtensionOption("http_version",
+	                          "HTTP version preference for the curl client: 'auto' (HTTP/2 via ALPN with HTTP/1.1 "
+	                          "fallback), '1.1' (force HTTP/1.1), or '2.0' (force HTTP/2, fail if peer rejects)",
+	                          LogicalType::VARCHAR, Value("auto"));
+	config.AddExtensionOption("httpfs_curl_verbose",
+	                          "Enable curl's CURLOPT_VERBOSE: protocol-level details (TLS handshake, ALPN selection, "
+	                          "HTTP/2 frame log) are printed to stderr. Useful for verifying HTTP/2 negotiation.",
+	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("s3_version_id_pinning", "Pin S3 reads to a specific object version for consistency",
 	                          LogicalType::BOOLEAN, Value(false));
 

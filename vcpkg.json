@@ -3,7 +3,7 @@
     "openssl",
     {
       "name": "curl",
-      "features": ["brotli", "zstd"]
+      "features": ["brotli", "http2", "zstd"]
     }
   ]
 }

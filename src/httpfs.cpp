@@ -61,6 +61,8 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 	FileOpener::TryGetCurrentSetting(opener, "hf_max_per_page", result->hf_max_per_page, info);
 	FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks, info);
 	FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
+	FileOpener::TryGetCurrentSetting(opener, "http_version", result->http_version, info);
+	FileOpener::TryGetCurrentSetting(opener, "httpfs_curl_verbose", result->curl_verbose, info);
 
 	{
 		auto db = FileOpener::TryGetDatabase(opener);
