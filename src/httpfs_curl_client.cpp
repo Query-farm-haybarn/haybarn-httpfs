@@ -203,6 +203,28 @@ public:
 		curl_easy_setopt(*curl, CURLOPT_TIMEOUT, http_params.timeout);
 		// set connection timeout
 		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT, http_params.timeout);
+
+		// HTTP version preference. "auto" attempts HTTP/2 over TLS via ALPN and
+		// transparently falls back to HTTP/1.1 if the peer doesn't negotiate h2 —
+		// this is the right default in 2026: AWS S3, GitHub, GCS, HuggingFace,
+		// and Cloudflare all support h2; servers that don't will fall back
+		// automatically. Plain http:// stays on 1.1 (CURL_HTTP_VERSION_2TLS does
+		// not attempt h2c). Users on servers that misbehave under h2 can opt out
+		// via `SET http_version='1.1'`.
+		long curl_http_version_opt = CURL_HTTP_VERSION_2TLS;
+		if (http_params.http_version == "1.1") {
+			curl_http_version_opt = CURL_HTTP_VERSION_1_1;
+		} else if (http_params.http_version == "2.0" || http_params.http_version == "2") {
+			curl_http_version_opt = CURL_HTTP_VERSION_2_0;
+		} else if (http_params.http_version != "auto" && !http_params.http_version.empty()) {
+			throw InvalidInputException("Unknown http_version '%s' (expected 'auto', '1.1', or '2.0')",
+			                            http_params.http_version);
+		}
+		curl_easy_setopt(*curl, CURLOPT_HTTP_VERSION, curl_http_version_opt);
+		// Surface protocol-level details (TLS handshake, ALPN selection, HTTP/2 frames)
+		// when the user wants to verify negotiation. Off by default — curl's verbose
+		// output is noisy and not appropriate for production.
+		curl_easy_setopt(*curl, CURLOPT_VERBOSE, http_params.curl_verbose ? 1L : 0L);
 		// Accept-Encoding is set per-request in the request methods below — Range requests
 		// get "identity" (and the response is validated to enforce byte-exact semantics),
 		// non-Range requests get "" so curl negotiates and transparently decodes every
