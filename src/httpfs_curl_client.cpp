@@ -10,9 +10,17 @@
 
 #ifndef EMSCRIPTEN
 #include "httpfs_curl_client.hpp"
+#include "httpfs_curl_multi_dispatcher.hpp"
 #endif
 
 namespace duckdb {
+
+CURLcode CURLHandle::Execute() {
+	if (use_multi_dispatch) {
+		return CurlMultiDispatcher::Execute(curl);
+	}
+	return curl_easy_perform(curl);
+}
 
 // we statically compile in libcurl, which means the cert file location of the build machine is the
 // place curl will look. But not every distro has this file in the same location, so we search a
@@ -227,6 +235,10 @@ public:
 		// when the user wants to verify negotiation. Off by default — curl's verbose
 		// output is noisy and not appropriate for production.
 		curl_easy_setopt(*curl, CURLOPT_VERBOSE, http_params.curl_verbose ? 1L : 0L);
+		// Route through the global curl_multi dispatcher when h2 multiplexing is
+		// requested. The dispatcher itself sets CURLOPT_PIPEWAIT on the handle so
+		// transfers wait for and multiplex onto an existing h2 connection.
+		curl->SetUseMultiDispatch(http_params.http2_multiplex);
 		// Accept-Encoding is set per-request in the request methods below — Range requests
 		// get "identity" (and the response is validated to enforce byte-exact semantics),
 		// non-Range requests get "" so curl negotiates and transparently decodes every

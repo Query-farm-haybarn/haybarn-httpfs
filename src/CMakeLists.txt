@@ -8,8 +8,13 @@ set(HTTPFS_SOURCES
     httpfs_extension.cpp
     s3_multi_part_upload.cpp)
 if(NOT EMSCRIPTEN)
-  set(HTTPFS_SOURCES ${HTTPFS_SOURCES} crypto.cpp httpfs_httplib_client.cpp
-                     httpfs_connection_caching.cpp httpfs_curl_client.cpp)
+  set(HTTPFS_SOURCES
+      ${HTTPFS_SOURCES}
+      crypto.cpp
+      httpfs_httplib_client.cpp
+      httpfs_connection_caching.cpp
+      httpfs_curl_client.cpp
+      httpfs_curl_multi_dispatcher.cpp)
 else()
   set(HTTPFS_SOURCES ${HTTPFS_SOURCES} httpfs_client_wasm.cpp)
 endif()
