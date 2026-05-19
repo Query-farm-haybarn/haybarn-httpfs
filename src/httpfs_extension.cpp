@@ -122,6 +122,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Enable curl's CURLOPT_VERBOSE: protocol-level details (TLS handshake, ALPN selection, "
 	                          "HTTP/2 frame log) are printed to stderr. Useful for verifying HTTP/2 negotiation.",
 	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("http2_multiplex",
+	                          "Route the curl client through a process-global curl_multi dispatcher so parallel range "
+	                          "reads share a single HTTP/2 connection via N streams instead of N separate connections. "
+	                          "Requires http_version='auto' or '2.0' and an H/2-capable peer to deliver any benefit.",
+	                          LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("s3_version_id_pinning", "Pin S3 reads to a specific object version for consistency",
 	                          LogicalType::BOOLEAN, Value(false));
 
