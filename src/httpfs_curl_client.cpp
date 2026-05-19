@@ -108,7 +108,24 @@ struct RequestInfo {
 	string body = "";
 	uint16_t response_code = 0;
 	std::vector<HTTPHeaders> header_collection;
+	// True when we sent Accept-Encoding: identity for this request (i.e. it is a Range request
+	// or otherwise requires byte-exact response semantics). Used to validate the response
+	// Content-Encoding header before delivering the body to the caller.
+	bool sent_identity_only = false;
 };
+
+static bool RequestIsRangeRequest(const HTTPHeaders &headers, const HTTPParams &params) {
+	if (headers.HasHeader("Range")) {
+		return true;
+	}
+	// extra_headers may carry the Range header when pre_merged_headers is false.
+	for (auto &entry : params.extra_headers) {
+		if (StringUtil::Lower(entry.first) == "range") {
+			return true;
+		}
+	}
+	return false;
+}
 
 static idx_t httpfs_client_count = 0;
 
@@ -186,8 +203,10 @@ public:
 		curl_easy_setopt(*curl, CURLOPT_TIMEOUT, http_params.timeout);
 		// set connection timeout
 		curl_easy_setopt(*curl, CURLOPT_CONNECTTIMEOUT, http_params.timeout);
-		// accept content as-is (i.e no decompressing)
-		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, NULL);
+		// Accept-Encoding is set per-request in the request methods below — Range requests
+		// get "identity" (and the response is validated to enforce byte-exact semantics),
+		// non-Range requests get "" so curl negotiates and transparently decodes every
+		// encoding it was built with (gzip, deflate, brotli, zstd).
 		// follow redirects
 		curl_easy_setopt(*curl, CURLOPT_FOLLOWLOCATION, http_params.follow_location ? 1L : 0L);
 
@@ -226,6 +245,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse(RequestIsRangeRequest(info.headers, info.params));
 		request_info->url = info.url;
 
 		CURLcode res;
@@ -247,8 +267,21 @@ public:
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
 
+		if (auto reject = RejectIfContentEncodingViolation()) {
+			return reject;
+		}
+
 		const idx_t bytes_received = request_info->body.size();
-		if (!request_info->header_collection.empty() &&
+		// Only sanity-check Content-Length against received bytes when the response is not
+		// Content-Encoded. When curl auto-decodes a non-identity response, bytes_received is the
+		// decoded size while Content-Length is the wire size — the comparison would be apples to
+		// oranges. Range responses (which set sent_identity_only) are already validated above to
+		// have identity encoding by the time we reach here.
+		const bool response_is_identity =
+		    request_info->header_collection.empty() ||
+		    !request_info->header_collection.back().HasHeader("Content-Encoding") ||
+		    StringUtil::Lower(request_info->header_collection.back().GetHeaderValue("Content-Encoding")) == "identity";
+		if (response_is_identity && !request_info->header_collection.empty() &&
 		    request_info->header_collection.back().HasHeader("content-length")) {
 			const idx_t content_length_received =
 			    std::stoi(request_info->header_collection.back().GetHeaderValue("content-length"));
@@ -285,6 +318,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse(RequestIsRangeRequest(info.headers, info.params));
 		// Add content type header from info
 		curl_headers.Add("Content-Type: " + info.content_type);
 		// transform parameters
@@ -323,6 +357,10 @@ public:
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
 
+		if (auto reject = RejectIfContentEncodingViolation()) {
+			return reject;
+		}
+
 		return TransformResponseCurl(res);
 	}
 
@@ -333,6 +371,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		RequireIdentityResponse();
 		request_info->url = info.url;
 		// transform parameters
 
@@ -361,6 +400,9 @@ public:
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		if (auto reject = RejectIfContentEncodingViolation()) {
+			return reject;
+		}
 		return TransformResponseCurl(res);
 	}
 
@@ -370,6 +412,7 @@ public:
 			state->delete_count++;
 		}
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse(RequestIsRangeRequest(info.headers, info.params));
 		// transform parameters
 		request_info->url = info.url;
 
@@ -397,6 +440,9 @@ public:
 
 		// Get HTTP response status code
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+		if (auto reject = RejectIfContentEncodingViolation()) {
+			return reject;
+		}
 		return TransformResponseCurl(res);
 	}
 
@@ -408,6 +454,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse(RequestIsRangeRequest(info.headers, info.params));
 		if (!info.headers.HasHeader("Content-Type")) {
 			const string content_type = "Content-Type: application/octet-stream";
 			curl_headers.Add(content_type.c_str());
@@ -446,6 +493,11 @@ public:
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
+
+		if (auto reject = RejectIfContentEncodingViolation()) {
+			return reject;
+		}
+
 		info.buffer_out = request_info->body;
 
 		const idx_t bytes_received = request_info->body.size();
@@ -461,8 +513,19 @@ private:
 	CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
 		auto &httpfs_params = params.Cast<HTTPFSParams>();
 
+		// Drop any caller-supplied Accept-Encoding; the curl client owns Accept-Encoding policy
+		// per-request (identity for Range, "" for non-Range). Leaving a caller-set value in
+		// place is a footgun: with our previous unconditional CURLOPT_ACCEPT_ENCODING=NULL it
+		// produced compressed responses we never decoded.
+		auto is_accept_encoding = [](const std::string &name) {
+			return StringUtil::Lower(name) == "accept-encoding";
+		};
+
 		std::vector<std::string> headers;
 		for (auto &entry : header_map) {
+			if (is_accept_encoding(entry.first)) {
+				continue;
+			}
 			const std::string new_header = entry.first + ": " + entry.second;
 			headers.push_back(new_header);
 		}
@@ -472,6 +535,9 @@ private:
 		}
 		if (!httpfs_params.pre_merged_headers) {
 			for (auto &entry : params.extra_headers) {
+				if (is_accept_encoding(entry.first)) {
+					continue;
+				}
 				curl_headers.Add(entry.first + ": " + entry.second);
 			}
 		}
@@ -485,6 +551,59 @@ private:
 		request_info->body = "";
 		request_info->url = "";
 		request_info->response_code = 0;
+		request_info->sent_identity_only = false;
+	}
+
+	// Send Accept-Encoding: identity and remember that the response must be identity-encoded.
+	// Used for GET / HEAD / PUT / DELETE — these all participate in a file-read lifecycle
+	// (HEAD probe followed by Range GETs, or PUT/DELETE on file objects), and we need
+	// consistent server responses across that lifecycle. Servers like GitHub return
+	// different ETags for gzip vs identity (`W/"..."` weak vs `"..."` strong); mixing
+	// encodings within a file's lifetime trips our ETag-mismatch detection in httpfs.cpp.
+	void RequireIdentityResponse() {
+		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, "identity");
+		request_info->sent_identity_only = true;
+	}
+
+	// Used for POST only: API calls (S3 LIST, multipart complete, HuggingFace API, …) live
+	// outside the file-read lifecycle and benefit meaningfully from wire compression on the
+	// response (highly compressible XML/JSON). Empty string asks curl to advertise every
+	// encoding it was built with and decode transparently. The has_range_header guard is
+	// defensive — a POST with a Range header is degenerate but if it ever happens we still
+	// want byte-exact response semantics.
+	void AllowCompressedResponse(bool has_range_header) {
+		if (has_range_header) {
+			RequireIdentityResponse();
+			return;
+		}
+		curl_easy_setopt(*curl, CURLOPT_ACCEPT_ENCODING, "");
+		request_info->sent_identity_only = false;
+	}
+
+	// If we asked for identity and the server returned a non-identity Content-Encoding, the
+	// body bytes are not the object bytes — reject the response before any caller content
+	// handler runs. Returns a populated error HTTPResponse, or nullptr if the response is OK
+	// to deliver.
+	unique_ptr<HTTPResponse> RejectIfContentEncodingViolation() {
+		if (!request_info->sent_identity_only) {
+			return nullptr;
+		}
+		if (request_info->header_collection.empty()) {
+			return nullptr;
+		}
+		auto &headers = request_info->header_collection.back();
+		if (!headers.HasHeader("Content-Encoding")) {
+			return nullptr;
+		}
+		auto value = headers.GetHeaderValue("Content-Encoding");
+		if (StringUtil::Lower(value) == "identity") {
+			return nullptr;
+		}
+		auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+		response->request_error = "Server returned Content-Encoding '" + value +
+		                          "' but we requested identity; refusing to deliver non-identity-encoded bytes.";
+		response->url = request_info->url;
+		return response;
 	}
 
 	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res) {

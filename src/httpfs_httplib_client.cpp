@@ -131,19 +131,50 @@ private:
 	duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
 		auto &httpfs_params = params.Cast<HTTPFSParams>();
 
+		auto is_accept_encoding = [](const std::string &name) {
+			return StringUtil::Lower(name) == "accept-encoding";
+		};
+
 		duckdb_httplib_openssl::Headers headers;
 		for (auto &entry : header_map) {
+			if (is_accept_encoding(entry.first)) {
+				continue;
+			}
 			headers.insert(entry);
 		}
 		if (!httpfs_params.pre_merged_headers) {
 			for (auto &entry : params.extra_headers) {
+				if (is_accept_encoding(entry.first)) {
+					continue;
+				}
 				headers.insert(entry);
 			}
 		}
+		// The bundled httplib does not reliably decode brotli/zstd, and we want a consistent
+		// byte-exact invariant for the httplib path. Force identity on every request and
+		// reject any non-identity Content-Encoding in TransformResponse. Users who want
+		// response compression should switch to the curl client.
+		headers.emplace("Accept-Encoding", "identity");
 		return headers;
 	}
 
 	unique_ptr<HTTPResponse> TransformResponse(const duckdb_httplib_openssl::Response &response) {
+		// We asked for Accept-Encoding: identity on every request. If the server applied a
+		// transfer compression anyway, the body bytes are not the object bytes — fail loudly
+		// rather than hand garbage to the reader.
+		auto ce_it = response.headers.find("Content-Encoding");
+		if (ce_it != response.headers.end() && StringUtil::Lower(ce_it->second) != "identity") {
+			auto err = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+			err->request_error = "Server returned Content-Encoding '" + ce_it->second +
+			                     "' but the httplib client only supports identity encoding. Switch to the curl "
+			                     "client (SET httpfs_client_implementation = 'curl') or configure the server to "
+			                     "disable transfer compression.";
+			for (auto &entry : response.headers) {
+				err->headers.Insert(entry.first, entry.second);
+			}
+			return err;
+		}
+
 		auto status_code = HTTPUtil::ToStatusCode(response.status);
 		auto result = make_uniq<HTTPResponse>(status_code);
 		result->body = response.body;
