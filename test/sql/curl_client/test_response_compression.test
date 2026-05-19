@@ -1,0 +1,56 @@
+# name: test/sql/curl_client/test_response_compression.test
+# description: Content-Encoding safety contract. Every file-read path in this
+# group: [curl_client]
+
+#              extension issues Range requests (the HTTPFileSystem is a
+#              random-access abstraction over HTTP), so the safety policy must
+#              reject any non-identity Content-Encoding on the response — for
+#              both the curl and httplib clients. The non-Range branch (where
+#              curl transparently decodes gzip/br/zstd) is exercised by
+#              internal API paths (S3 LIST, S3 multipart complete, etc.) and
+#              is not directly reachable from SQL, so it is not asserted here.
+
+require httpfs
+
+require-env COMPRESSION_TEST_SERVER_URL
+
+require-env COMPRESSION_TEST_SERVER_DIR
+
+statement ok
+COPY (SELECT i FROM range(0, 5) tbl(i)) TO '${COMPRESSION_TEST_SERVER_DIR}/seed.csv' (HEADER false);
+
+# --- curl client: identity baseline succeeds.
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+query I
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/identity/seed.csv';
+----
+5
+
+# --- curl client: a Range request that comes back with Content-Encoding: gzip
+#     is rejected before its bytes reach the CSV reader.
+
+statement error
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/gzip/seed.csv';
+----
+Content-Encoding
+
+# --- httplib client: identity baseline succeeds.
+
+statement ok
+SET httpfs_client_implementation='httplib';
+
+query I
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/identity/seed.csv';
+----
+5
+
+# --- httplib client: forces identity on every request, so any non-identity
+#     Content-Encoding response is rejected with a clear error.
+
+statement error
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/gzip/seed.csv';
+----
+Content-Encoding

@@ -1,0 +1,43 @@
+# name: test/sql/curl_client/test_conditional_read_consistency.test
+# description: A remote file that mutates between two reads must be detected
+# group: [curl_client]
+
+#              via the If-Range / If-Match precondition signal at the protocol
+#              level (200-instead-of-206 on a Range GET, or 412 on a HEAD).
+#              No client-side ETag string compare should be involved.
+
+require httpfs
+
+require-env COMPRESSION_TEST_SERVER_URL
+
+require-env COMPRESSION_TEST_SERVER_DIR
+
+# Seed a CSV that will be served through the /conditional/ endpoint. The endpoint
+# wraps the on-disk file with a server-side generation counter; mutation via
+# /mutate/<filename> changes the served representation (different ETag).
+statement ok
+COPY (SELECT i AS v FROM range(0, 50) tbl(i))
+TO '${COMPRESSION_TEST_SERVER_DIR}/cond_seed.csv' (HEADER);
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+# First read: succeeds normally; the client caches the strong ETag.
+query I
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/conditional/cond_seed.csv';
+----
+50
+
+# Mutate the server-side representation via the /mutate/ control endpoint
+# (a GET on /mutate/<filename> bumps the generation counter and serves a tiny
+# acknowledgement body).
+statement ok
+SELECT length(content) FROM read_text('${COMPRESSION_TEST_SERVER_URL}/mutate/cond_seed.csv');
+
+# Subsequent read: a Range request now carries the old If-Range validator, the
+# server rejects the precondition (returns 200 with the full new representation
+# instead of 206), and httpfs throws "remote file changed."
+statement error
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/conditional/cond_seed.csv';
+----
+appears to have changed

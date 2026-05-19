@@ -142,6 +142,43 @@ static void AddUserAgentIfAvailable(HTTPFSParams &http_params, HTTPHeaders &head
 	}
 }
 
+// Format a timestamp as an RFC 7231 IMF-fixdate string (e.g. "Wed, 21 Oct 2015 07:28:00 GMT").
+// Used for the If-Unmodified-Since precondition when only Last-Modified is cached.
+// timestamp_t is UTC microseconds-since-epoch; "GMT" is hardcoded since HTTP-date is always GMT.
+static string FormatHTTPDate(timestamp_t timestamp) {
+	return StrfTimeFormat::Format(timestamp, "%a, %d %h %Y %H:%M:%S GMT");
+}
+
+// RFC 7232 §2.3: an ETag is "strong" iff it does not start with the "W/" prefix.
+// RFC 9110 §13.1.1 says servers MUST use strong comparison for If-Match — a weak ETag in
+// If-Match would never satisfy strong comparison, so we use If-Unmodified-Since for weak
+// ETags instead.
+static bool IsStrongEtag(const string &etag) {
+	return !etag.empty() && !(etag.size() >= 2 && etag[0] == 'W' && etag[1] == '/');
+}
+
+// Add the conditional-read precondition headers to a request for an HTTPFileHandle, if a
+// validator is cached. Servers that honor the precondition return 412 Precondition Failed
+// on mismatch (RFC 9110 §13.1.1 / §13.1.4); servers that don't support these headers ignore
+// them harmlessly. Returns true iff at least one precondition header was added (so the
+// caller can decide whether to treat 412 as "file changed" or pass it through). When
+// unsafe_disable_etag_checks is set, no precondition is added.
+static bool AddConsistencyPreconditions(const HTTPFileHandle &hfh, HTTPHeaders &header_map) {
+	if (hfh.http_params.unsafe_disable_etag_checks) {
+		return false;
+	}
+	bool added = false;
+	if (IsStrongEtag(hfh.etag)) {
+		header_map.Insert("If-Match", hfh.etag);
+		added = true;
+	} else if (hfh.last_modified.value > 0) {
+		// Weak ETag or no ETag at all → use the date-based precondition (RFC 9110 §13.1.4).
+		header_map.Insert("If-Unmodified-Since", FormatHTTPDate(hfh.last_modified));
+		added = true;
+	}
+	return added;
+}
+
 static void AddHandleHeaders(HTTPFSParams &http_params, HTTPHeaders &header_map) {
 	// Inject headers from the http param extra_headers into the request
 	for (auto &header : http_params.extra_headers) {
@@ -184,12 +221,30 @@ unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, string 
 	AddUserAgentIfAvailable(hfh.http_params, header_map);
 	AddHandleHeaders(hfh.http_params, header_map);
 
+	// Conditional probe: if we already have a validator cached for this handle (i.e. this
+	// is a re-probe rather than the initial open), ask the server to enforce "still the
+	// same resource" via If-Match / If-Unmodified-Since. The first HEAD at file open has
+	// no cached validator and skips the conditional.
+	const bool sent_precondition = AddConsistencyPreconditions(hfh, header_map);
+
 	auto http_client = hfh.GetClient();
 
 	HeadRequestInfo head_request(url, header_map, hfh.http_params);
 	auto response = http_util.Request(head_request, http_client);
 
 	hfh.StoreClient(std::move(http_client));
+
+	if (sent_precondition && response->status == HTTPStatusCode::PreconditionFailed_412) {
+		if (global_metadata_cache) {
+			global_metadata_cache->Erase(handle.path);
+		}
+		throw HTTPException(*response,
+		                    "Remote file \"%s\" appears to have changed: the server rejected our If-Match / "
+		                    "If-Unmodified-Since precondition with 412 Precondition Failed.\nYou can disable "
+		                    "conditional reads via `SET unsafe_disable_etag_checks = true;`",
+		                    handle.path);
+	}
+
 	return response;
 }
 
@@ -228,10 +283,25 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 
 	D_ASSERT(hfh.cached_file_handle);
 
+	// Conditional read: send If-Match / If-Unmodified-Since to surface mid-read mutations
+	// as 412 Precondition Failed. GetRequest is the full-file-GET fallback path used when
+	// Range isn't supported; consistency-checking still applies.
+	const bool sent_precondition = AddConsistencyPreconditions(hfh, header_map);
+
 	auto http_client = hfh.GetClient();
 	GetRequestInfo get_request(
 	    url, header_map, hfh.http_params,
 	    [&](const HTTPResponse &response) {
+		    if (sent_precondition && response.status == HTTPStatusCode::PreconditionFailed_412) {
+			    if (global_metadata_cache) {
+				    global_metadata_cache->Erase(handle.path);
+			    }
+			    throw HTTPException(response,
+			                        "Remote file \"%s\" appears to have changed: the server rejected our If-Match / "
+			                        "If-Unmodified-Since precondition with 412 Precondition Failed.\nYou can disable "
+			                        "conditional reads via `SET unsafe_disable_etag_checks = true;`",
+			                        handle.path);
+		    }
 		    if (static_cast<int>(response.status) >= 400) {
 			    string error =
 			        "HTTP GET error on '" + url + "' (HTTP " + to_string(static_cast<int>(response.status)) + ")";
@@ -286,6 +356,15 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	string range_expr = "bytes=" + to_string(file_offset) + "-" + to_string(file_offset + buffer_out_len - 1);
 	header_map.Insert("Range", range_expr);
 
+	// Conditional read: ask the server to enforce "this is still the same resource" via
+	// If-Match (strong ETag) or If-Unmodified-Since (Last-Modified). Mismatch produces
+	// 412 Precondition Failed at the protocol level — unambiguous, server-arbitrated,
+	// and unaffected by representation flux (weak/strong ETag variants, gzip/identity).
+	// Servers that don't support these headers ignore them; the existing Content-Length
+	// vs buffer_out_len check below handles the "server doesn't support Range" fallback.
+	// The unsafe_disable_etag_checks setting bypasses the precondition.
+	const bool sent_precondition = AddConsistencyPreconditions(hfh, header_map);
+
 	auto http_client = hfh.GetClient();
 
 	idx_t out_offset = 0;
@@ -293,41 +372,23 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	GetRequestInfo get_request(
 	    url, header_map, hfh.http_params,
 	    [&](const HTTPResponse &response) {
+		    if (sent_precondition && response.status == HTTPStatusCode::PreconditionFailed_412) {
+			    if (global_metadata_cache) {
+				    global_metadata_cache->Erase(handle.path);
+			    }
+			    throw HTTPException(response,
+			                        "Remote file \"%s\" appears to have changed: the server rejected our "
+			                        "If-Match / If-Unmodified-Since precondition with 412 Precondition Failed.\n"
+			                        "For parquet or similar single-table sources, retry the query; for persistent "
+			                        "file handles such as databases, `DETACH` and re-`ATTACH`.\nYou can disable "
+			                        "conditional reads via `SET unsafe_disable_etag_checks = true;`",
+			                        handle.path);
+		    }
 		    if (static_cast<int>(response.status) >= 400) {
 			    throw GetHTTPError(handle, response, url);
 		    }
 		    if (static_cast<int>(response.status) < 300) { // done redirecting
 			    out_offset = 0;
-
-			    if (!hfh.http_params.unsafe_disable_etag_checks && !hfh.etag.empty() && response.HasHeader("ETag")) {
-				    string responseEtag = response.GetHeaderValue("ETag");
-
-				    // Strip surrounding quotes for comparison: some S3-compatible backends
-				    // (e.g. NetApp ONTAP) omit quotes in ListObjectsV2 XML ETags, while
-				    // HTTP headers include them per RFC 7232
-				    auto strip_quotes = [](const string &etag) -> string {
-					    if (etag.size() >= 2 && etag.front() == '"' && etag.back() == '"') {
-						    return etag.substr(1, etag.size() - 2);
-					    }
-					    return etag;
-				    };
-
-				    if (!responseEtag.empty() && strip_quotes(responseEtag) != strip_quotes(hfh.etag)) {
-					    if (global_metadata_cache) {
-						    global_metadata_cache->Erase(handle.path);
-					    }
-					    throw HTTPException(
-					        response,
-					        "ETag on reading file \"%s\" was initially %s and now it returned %s, this likely means "
-					        "the "
-					        "remote file has "
-					        "changed.\nFor parquet or similar single table sources, consider retrying the query, for "
-					        "persistent FileHandles such as databases consider `DETACH` and re-`ATTACH` "
-					        "\nYou can disable checking etags via `SET "
-					        "unsafe_disable_etag_checks = true;`",
-					        handle.path, hfh.etag, response.GetHeaderValue("ETag"));
-				    }
-			    }
 
 			    if (hfh.http_params.s3_version_id_pinning && hfh.version_id.empty() &&
 			        response.HasHeader("x-amz-version-id")) {
@@ -375,8 +436,8 @@ HTTPInput::HTTPInput(unique_ptr<HTTPParams> params_p)
 HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFlags flags,
                                shared_ptr<HTTPInput> input_p)
     : FileHandle(fs, file.path, flags), http_input(std::move(input_p)), http_params(http_input->http_params),
-      flags(flags), length(0), force_full_download(false), buffer_available(0), buffer_idx(0), file_offset(0),
-      buffer_start(0), buffer_end(0) {
+      flags(flags), length(0), last_modified(0), force_full_download(false), buffer_available(0), buffer_idx(0),
+      file_offset(0), buffer_start(0), buffer_end(0) {
 	// check if the handle has extended properties that can be set directly in the handle
 	// if we have these properties we don't need to do a head request to obtain them later
 	if (file.extended_info) {

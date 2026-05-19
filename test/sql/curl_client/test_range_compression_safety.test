@@ -1,0 +1,57 @@
+# name: test/sql/curl_client/test_range_compression_safety.test
+# description: A server that returns Content-Encoding != identity on a Range
+# group: [curl_client]
+
+#              response must be rejected by both clients — Range semantics are
+#              undefined under transfer compression, and silently delivering
+#              compressed bytes to the parquet reader corrupts data.
+
+require httpfs
+
+require parquet
+
+require-env COMPRESSION_TEST_SERVER_URL
+
+require-env COMPRESSION_TEST_SERVER_DIR
+
+# Seed a parquet file large enough that the reader will issue Range GETs
+# for the footer and row groups.
+statement ok
+COPY (SELECT i, repeat('x', 64) AS s FROM range(0, 10000) tbl(i))
+TO '${COMPRESSION_TEST_SERVER_DIR}/seed.parquet' (FORMAT PARQUET);
+
+# --- curl client: range_ok endpoint serves identity-encoded Range responses, so
+#     the parquet reader can complete normally.
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+query I
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/range_ok/seed.parquet';
+----
+10000
+
+# --- curl client: range_misbehaved returns Content-Encoding: gzip on Range
+#     responses. Our policy must reject this rather than feed compressed bytes
+#     to the parquet reader.
+
+statement error
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/range_misbehaved/seed.parquet';
+----
+Content-Encoding
+
+# --- httplib client: same expectations. The httplib path forces identity on
+#     every request and rejects any non-identity response.
+
+statement ok
+SET httpfs_client_implementation='httplib';
+
+query I
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/range_ok/seed.parquet';
+----
+10000
+
+statement error
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/range_misbehaved/seed.parquet';
+----
+Content-Encoding

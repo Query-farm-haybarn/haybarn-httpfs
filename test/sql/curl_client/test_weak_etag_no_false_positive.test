@@ -1,0 +1,38 @@
+# name: test/sql/curl_client/test_weak_etag_no_false_positive.test
+# description: Weak ETags must not trip a false "remote file changed" error.
+# group: [curl_client]
+
+#              When the server returns W/"opaque" we cannot use the ETag as an
+#              If-Range validator (RFC 9110 §13.1.5 says servers SHOULD only
+#              honor strong validators); we fall back to Last-Modified. The
+#              underlying file is unchanged across reads, so the server honors
+#              the precondition and both reads succeed.
+#              This is the structural cure for the GitHub-Raw regression scenario
+#              where the previous client-side ETag comparator falsely flagged
+#              `W/"abc"` and `"abc"` as different.
+
+require httpfs
+
+require-env COMPRESSION_TEST_SERVER_URL
+
+require-env COMPRESSION_TEST_SERVER_DIR
+
+statement ok
+COPY (SELECT i AS v FROM range(0, 50) tbl(i))
+TO '${COMPRESSION_TEST_SERVER_DIR}/weak_seed.csv' (HEADER);
+
+statement ok
+SET httpfs_client_implementation='curl';
+
+# Two reads in a row against the weak-ETag endpoint. Old code would have
+# thrown on the second read because of the W/ vs "" representation flux;
+# the new code uses Last-Modified as the If-Range validator and proceeds.
+query I
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/weak_etag/weak_seed.csv';
+----
+50
+
+query I
+SELECT count(*) FROM '${COMPRESSION_TEST_SERVER_URL}/weak_etag/weak_seed.csv';
+----
+50
