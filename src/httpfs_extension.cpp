@@ -125,8 +125,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("http2_multiplex",
 	                          "Route the curl client through a process-global curl_multi dispatcher so parallel range "
 	                          "reads share a single HTTP/2 connection via N streams instead of N separate connections. "
-	                          "Requires http_version='auto' or '2.0' and an H/2-capable peer to deliver any benefit.",
-	                          LogicalType::BOOLEAN, Value(false));
+	                          "Requires http_version='auto' or '2.0' and an H/2-capable peer to deliver any benefit; "
+	                          "falls back to a normal connection pool on H/1.1 peers. On by default.",
+	                          LogicalType::BOOLEAN, Value(true));
 	config.AddExtensionOption("s3_version_id_pinning", "Pin S3 reads to a specific object version for consistency",
 	                          LogicalType::BOOLEAN, Value(false));
 
