@@ -3,6 +3,8 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
+#include <atomic>
+
 namespace duckdb {
 
 class HTTPFSClient : public HTTPClient {
@@ -113,6 +115,12 @@ public:
 		}
 		req.content_receiver = [&](const char *data, size_t data_length, uint64_t /*offset*/,
 		                           uint64_t /*total_length*/) {
+			// Abort once the caller's cancellation flag is observed set. This only fires while
+			// response bytes are arriving (httplib has no upload-phase hook), so it is weaker
+			// than the curl backend's progress callback — acceptable for this fallback client.
+			if (info.cancellation && info.cancellation->load(std::memory_order_relaxed)) {
+				return false;
+			}
 			if (state) {
 				state->total_bytes_received += data_length;
 			}
@@ -122,6 +130,11 @@ public:
 		// First assign body, this is the body that will be uploaded
 		req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
 		auto transformed_req = TransformResult(client->send(req));
+		if (info.cancellation && info.cancellation->load(std::memory_order_relaxed)) {
+			transformed_req->cancelled = true;
+			transformed_req->request_error = "HTTP POST request was cancelled";
+			return transformed_req;
+		}
 		// Then, after actual re-quest, re-assign body to the response value of the POST request
 		transformed_req->body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
 		return transformed_req;

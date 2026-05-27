@@ -4,6 +4,7 @@
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 
+#include <atomic>
 #include <curl/curl.h>
 #include <sys/stat.h>
 #include "duckdb/common/exception/http_exception.hpp"
@@ -53,6 +54,18 @@ static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, vo
 	std::string *str = static_cast<std::string *>(userp);
 	str->append(static_cast<char *>(contents), totalSize);
 	return totalSize;
+}
+
+// libcurl progress callback used to honor a request's cancellation flag. Returning a
+// non-zero value tells curl to abort the transfer with CURLE_ABORTED_BY_CALLBACK. It
+// fires throughout the transfer (upload, the wait for the response, and download), which
+// is why this is the right hook for POST — the write callback only runs once response
+// bytes arrive. clientp is the const atomic<bool>* set via CURLOPT_XFERINFODATA; it is
+// read cross-thread (the curl-multi dispatcher thread) so it must be atomic, and we
+// tolerate a null pointer defensively.
+static int CancelXferInfo(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+	auto *flag = static_cast<const std::atomic<bool> *>(clientp);
+	return (flag && flag->load(std::memory_order_relaxed)) ? 1 : 0;
 }
 
 // Normalize an HTTP header field name to RFC 7230 §3.2 case-insensitive
@@ -542,6 +555,16 @@ public:
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
+			// Arm the cancellation progress hook for this transfer when the caller supplied a
+			// flag. It is disarmed again by the next request's ResetRequestInfo(). XFERINFODATA
+			// is a const pointer; curl's setopt takes void*, hence the cast.
+			if (info.cancellation) {
+				curl_easy_setopt(*curl, CURLOPT_XFERINFOFUNCTION, CancelXferInfo);
+				curl_easy_setopt(*curl, CURLOPT_XFERINFODATA,
+				                 const_cast<std::atomic<bool> *>(info.cancellation.get()));
+				curl_easy_setopt(*curl, CURLOPT_NOPROGRESS, 0L);
+			}
+
 			// Execute POST request
 			res = curl->Execute();
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
@@ -549,6 +572,19 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
 			curl_easy_setopt(*curl, CURLOPT_POST, 0L);
 			curl_url_cleanup(url);
+		}
+
+		// A transfer aborted because the caller's cancellation flag was observed set comes back
+		// as CURLE_ABORTED_BY_CALLBACK. Keying off the flag distinguishes a caller cancel from
+		// the dispatcher's shutdown-path abort (both are terminal — ShouldRetry() is false for a
+		// cancelled response — so the only thing the rare overlap affects is the error string).
+		if (res == CURLE_ABORTED_BY_CALLBACK && info.cancellation &&
+		    info.cancellation->load(std::memory_order_relaxed)) {
+			auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+			response->cancelled = true;
+			response->request_error = "HTTP POST request was cancelled";
+			response->url = request_info->url;
+			return response;
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -611,6 +647,13 @@ private:
 		request_info->url = "";
 		request_info->response_code = 0;
 		request_info->sent_identity_only = false;
+		// Disarm the cancellation progress hook unconditionally on every request. This handle
+		// is cached and reused (and Initialize() doesn't touch progress options), so a token
+		// armed for a previous Post() must not survive into a later tokenless request — leaving
+		// CURLOPT_XFERINFODATA pointing at a since-freed flag would be a use-after-free.
+		curl_easy_setopt(*curl, CURLOPT_NOPROGRESS, 1L);
+		curl_easy_setopt(*curl, CURLOPT_XFERINFOFUNCTION, nullptr);
+		curl_easy_setopt(*curl, CURLOPT_XFERINFODATA, nullptr);
 	}
 
 	// Send Accept-Encoding: identity and remember that the response must be identity-encoded.
