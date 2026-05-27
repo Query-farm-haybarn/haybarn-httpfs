@@ -22,12 +22,12 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@5949d2c1c6b118df0b9560b37cd8f81adb2207db
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@f0dc2977a2be5688dfa4048b9fc45e6a3730e812
     secrets:
       vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
       extension_name: httpfs
-      duckdb_version: haybarn-v1.5.2-rc13
+      duckdb_version: haybarn-v1.5.3-rc3
       ci_tools_version: haybarn
       override_duckdb_repository: 'https://github.com/Query-farm-haybarn/haybarn'
       override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
@@ -42,11 +42,11 @@ jobs:
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@5949d2c1c6b118df0b9560b37cd8f81adb2207db
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@f0dc2977a2be5688dfa4048b9fc45e6a3730e812
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: haybarn-v1.5.2-rc13
+      duckdb_version: haybarn-v1.5.3-rc3
       ci_tools_version: haybarn
       override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
       # Push-to-haybarn writes BOTH the versioned CalVer path AND the rolling-
@@ -61,10 +61,10 @@ jobs:
 
   code-quality:
     name: Code Quality
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@5949d2c1c6b118df0b9560b37cd8f81adb2207db
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@f0dc2977a2be5688dfa4048b9fc45e6a3730e812
     with:
       extension_name: httpfs
-      duckdb_version: haybarn-v1.5.2-rc13
+      duckdb_version: haybarn-v1.5.3-rc3
       ci_tools_version: haybarn
       override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
       extra_toolchains: 'python3'
