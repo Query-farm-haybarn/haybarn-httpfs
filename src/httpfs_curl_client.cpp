@@ -572,8 +572,7 @@ public:
 			// is a const pointer; curl's setopt takes void*, hence the cast.
 			if (info.cancellation) {
 				curl_easy_setopt(*curl, CURLOPT_XFERINFOFUNCTION, CancelXferInfo);
-				curl_easy_setopt(*curl, CURLOPT_XFERINFODATA,
-				                 const_cast<std::atomic<bool> *>(info.cancellation.get()));
+				curl_easy_setopt(*curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool> *>(info.cancellation.get()));
 				curl_easy_setopt(*curl, CURLOPT_NOPROGRESS, 0L);
 			}
 
