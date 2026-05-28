@@ -723,14 +723,35 @@ private:
 		response->body = request_info->body;
 		response->url = request_info->url;
 		response->reason = HTTPUtil::GetStatusMessage(HTTPUtil::ToStatusCode(request_info->response_code));
+		// When curl transparently decoded a non-identity Content-Encoding, the wire Content-Length
+		// describes the compressed representation and Content-Encoding describes a transformation
+		// we've already undone. Hand the caller headers that match the bytes in response->body:
+		// drop both, then emit a Content-Length matching the decoded size.
+		bool body_was_decoded = false;
+		if (!request_info->header_collection.empty()) {
+			auto &wire_headers = request_info->header_collection.back();
+			if (wire_headers.HasHeader("Content-Encoding")) {
+				const auto ce = StringUtil::Lower(wire_headers.GetHeaderValue("Content-Encoding"));
+				body_was_decoded = !ce.empty() && ce != "identity";
+			}
+		}
 		if (!request_info->header_collection.empty()) {
 			for (auto &header : request_info->header_collection.back()) {
 				// We should not return __RESPONSE_STATUS__ to the user. It's only there for debugging.
 				if (header.first == "__RESPONSE_STATUS__") {
 					continue;
 				}
+				if (body_was_decoded) {
+					const auto lower = StringUtil::Lower(header.first);
+					if (lower == "content-length" || lower == "content-encoding") {
+						continue;
+					}
+				}
 				response->headers.Insert(header.first, header.second);
 			}
+		}
+		if (body_was_decoded) {
+			response->headers.Insert("Content-Length", std::to_string(response->body.size()));
 		}
 		// ResetRequestInfo();
 		return response;
