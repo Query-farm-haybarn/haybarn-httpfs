@@ -12,7 +12,7 @@
 #include "crypto.hpp"
 #endif // OVERRIDE_ENCRYPTION_UTILS
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 #include "httpfs_curl_client.hpp"
 #endif
 
@@ -149,7 +149,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			throw InvalidInputException("Unsupported option for httpfs_client_implementation, only `wasm` and "
 			                            "`default` are currently supported for duckdb-wasm");
 		}
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 		// HTTP util classes are supposed to be cheap, which provides acces to the HTTP client, and generally don't
 		// store resources (i.e., connection pool).
 		if (value == "curl" || value == "default") {
@@ -170,7 +170,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto callback_httpfs_connection_caching = [](ClientContext &context, SetScope scope, Value &parameter) {
 		auto &config = DBConfig::GetConfig(context);
 		auto &http_util = config.GetHTTPUtil();
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 		auto *curl_util = dynamic_cast<HTTPFSCurlUtil *>(&http_util);
 		if (curl_util) {
 			curl_util->connection_caching_enabled = BooleanValue::Get(parameter);
@@ -188,7 +188,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	if (http_util.GetName() == "WasmHTTPUtils") {
 		// Already handled, do not override
 	} else {
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 		config.SetHTTPUtil(make_shared_ptr<HTTPFSCurlUtil>());
 #else
 		config.SetHTTPUtil(make_shared_ptr<HTTPFSUtil>());
