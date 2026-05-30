@@ -1,7 +1,7 @@
 #include "s3_multi_part_upload.hpp"
 
 #include <thread>
-#ifdef EMSCRIPTEN
+#ifdef __EMSCRIPTEN__
 #define SAME_THREAD_UPLOAD
 #endif
 namespace duckdb {
