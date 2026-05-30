@@ -113,7 +113,7 @@ public:
 	string GetName() const override;
 };
 
-#ifndef EMSCRIPTEN
+#ifndef __EMSCRIPTEN__
 
 class HTTPFSCurlUtil : public HTTPFSUtil {
 public:
