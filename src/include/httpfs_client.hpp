@@ -76,6 +76,13 @@ struct HTTPFSParams : public HTTPParams {
 	// connection pool, no regression vs easy interface) and the H/2 win is
 	// large enough that opt-in would leave it dead-code in practice.
 	bool http2_multiplex {true};
+	// Non-owning pointer to the opening query's interrupt flag (&ClientContext::interrupted),
+	// captured at open time when the FileOpener yields a ClientContext. Propagated onto each
+	// request's BaseRequest::cancellation so in-flight reads (range GETs / HEAD) abort when the
+	// query is cancelled. Null for database-instance-level opens (DatabaseFileOpener returns no
+	// context), which sidesteps any lifetime hazard: the flag is only captured for opens whose
+	// handle lives within the connection's ClientContext (the remote-file-in-a-query case).
+	optional_ptr<const atomic<bool>> interrupt_flag;
 };
 
 class HTTPClientConnectionCache {
