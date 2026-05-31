@@ -71,6 +71,15 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 		}
 	}
 
+	// Capture the opening query's interrupt flag so in-flight reads can be cancelled. Only
+	// ClientContextFileOpener yields a context; database-instance-level opens (DatabaseFileOpener)
+	// return null and leave the flag unset — which is also what keeps this safe, since those are
+	// the opens whose handle could outlive the context. For the common remote-file-in-a-query
+	// path the handle's lifetime nests inside this ClientContext, so the pointer stays valid.
+	if (auto context = FileOpener::TryGetClientContext(opener)) {
+		result->interrupt_flag = &context->interrupted;
+	}
+
 	unique_ptr<KeyValueSecretReader> settings_reader;
 	if (info && !S3FileSystem::TryGetPrefix(info->file_path).empty()) {
 		// This is an S3-type url, we should
@@ -235,6 +244,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::HeadRequest(FileHandle &handle, string 
 	auto http_client = hfh.GetClient();
 
 	HeadRequestInfo head_request(url, header_map, hfh.http_params);
+	head_request.cancellation = hfh.http_params.interrupt_flag;
 	auto response = http_util.Request(head_request, http_client);
 
 	hfh.StoreClient(std::move(http_client));
@@ -343,6 +353,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 		    return true;
 	    });
 
+	get_request.cancellation = hfh.http_params.interrupt_flag;
 	auto response = http_util.Request(get_request, http_client);
 
 	hfh.StoreClient(std::move(http_client));
@@ -434,6 +445,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRangeRequest(FileHandle &handle, str
 	    });
 
 	get_request.try_request = hfh.auto_fallback_to_full_file_download;
+	get_request.cancellation = hfh.http_params.interrupt_flag;
 
 	auto response = http_util.Request(get_request, http_client);
 
