@@ -61,24 +61,30 @@ public:
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
 		if (!info.response_handler && !info.content_handler) {
-			auto result = TransformResult(client->Get(info.path, headers));
+			auto result = ApplyCancellation(TransformResult(client->Get(info.path, headers)), info, "GET");
 			if (state) {
 				state->total_bytes_received += result->body.size();
 			}
 			return result;
 		} else {
-			return TransformResult(client->Get(
-			    info.path.c_str(), headers,
-			    [&](const duckdb_httplib_openssl::Response &response) {
-				    auto http_response = TransformResponse(response);
-				    return info.response_handler(*http_response);
-			    },
-			    [&](const char *data, size_t data_length) {
-				    if (state) {
-					    state->total_bytes_received += data_length;
-				    }
-				    return info.content_handler(const_data_ptr_cast(data), data_length);
-			    }));
+			return ApplyCancellation(TransformResult(client->Get(
+			                             info.path.c_str(), headers,
+			                             [&](const duckdb_httplib_openssl::Response &response) {
+				                             auto http_response = TransformResponse(response);
+				                             return info.response_handler(*http_response);
+			                             },
+			                             [&](const char *data, size_t data_length) {
+				                             // Abort the download once the caller's cancellation flag is observed set;
+				                             // returning false stops httplib from delivering further body bytes.
+				                             if (CancellationRequested(info)) {
+					                             return false;
+				                             }
+				                             if (state) {
+					                             state->total_bytes_received += data_length;
+				                             }
+				                             return info.content_handler(const_data_ptr_cast(data), data_length);
+			                             })),
+			                         info, "GET");
 		}
 	}
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
@@ -88,8 +94,9 @@ public:
 			state->total_bytes_sent += info.buffer_in_len;
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformResult(client->Put(info.path, headers, const_char_ptr_cast(info.buffer_in), info.buffer_in_len,
-		                                   info.content_type));
+		return ApplyCancellation(TransformResult(client->Put(info.path, headers, const_char_ptr_cast(info.buffer_in),
+		                                                     info.buffer_in_len, info.content_type)),
+		                         info, "PUT");
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
@@ -98,7 +105,7 @@ public:
 			state->head_count++;
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformResult(client->Head(info.path, headers));
+		return ApplyCancellation(TransformResult(client->Head(info.path, headers)), info, "HEAD");
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
@@ -107,7 +114,7 @@ public:
 			state->delete_count++;
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformResult(client->Delete(info.path, headers));
+		return ApplyCancellation(TransformResult(client->Delete(info.path, headers)), info, "DELETE");
 	}
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
@@ -133,7 +140,7 @@ public:
 			// Abort once the caller's cancellation flag is observed set. This only fires while
 			// response bytes are arriving (httplib has no upload-phase hook), so it is weaker
 			// than the curl backend's progress callback — acceptable for this fallback client.
-			if (info.cancellation && info.cancellation->load(std::memory_order_relaxed)) {
+			if (CancellationRequested(info)) {
 				return false;
 			}
 			if (state) {
@@ -145,10 +152,12 @@ public:
 		// First assign body, this is the body that will be uploaded
 		req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
 		auto transformed_req = TransformResult(client->send(req));
-		if (info.cancellation && info.cancellation->load(std::memory_order_relaxed)) {
-			transformed_req->cancelled = true;
-			transformed_req->request_error = "HTTP POST request was cancelled";
-			return transformed_req;
+		if (transformed_req && transformed_req->HasRequestError() && CancellationRequested(info)) {
+			// Genuinely aborted mid-transfer (receiver returned false -> Error::Canceled). A
+			// cancelled response carries no useful body, so skip the upload-body reassignment done
+			// on the normal path below. A POST that completed with the flag set only at the last
+			// moment falls through and is returned as the success it was.
+			return ApplyCancellation(std::move(transformed_req), info, "POST");
 		}
 		// Then, after actual re-quest, re-assign body to the response value of the POST request
 		transformed_req->body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
@@ -156,6 +165,28 @@ public:
 	}
 
 private:
+	static bool CancellationRequested(const BaseRequest &info) {
+		return info.cancellation && info.cancellation->load(std::memory_order_relaxed);
+	}
+
+	// Mark a response as cancelled when the caller's flag is set AND the underlying request did not
+	// complete (i.e. it carries a request_error). This fallback can only interrupt a transfer where
+	// httplib hands us a callback: the Get/Post content receivers return false to abort, which
+	// surfaces as Error::Canceled -> an INVALID response with a request_error. The bodyless
+	// Head/Delete and simple Get/Put paths have no progress hook, so a request that ran to
+	// completion is returned as-is even if the flag flipped at the last moment — matching the curl
+	// backend, which reports cancelled only when it actually aborted the transfer (and avoiding a
+	// self-contradictory success=true + cancelled=true response). A request that genuinely failed
+	// while the flag was set is reported cancelled so it is treated as terminal (no retry).
+	static unique_ptr<HTTPResponse> ApplyCancellation(unique_ptr<HTTPResponse> response, const BaseRequest &info,
+	                                                  const char *method) {
+		if (response && response->HasRequestError() && CancellationRequested(info)) {
+			response->cancelled = true;
+			response->request_error = "HTTP " + string(method) + " request was cancelled";
+		}
+		return response;
+	}
+
 	duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
 		auto &httpfs_params = params.Cast<HTTPFSParams>();
 

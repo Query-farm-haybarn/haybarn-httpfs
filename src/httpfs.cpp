@@ -72,6 +72,15 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 		}
 	}
 
+	// Capture the opening query's interrupt flag so in-flight reads can be cancelled. Only
+	// ClientContextFileOpener yields a context; database-instance-level opens (DatabaseFileOpener)
+	// return null and leave the flag unset — which is also what keeps this safe, since those are
+	// the opens whose handle could outlive the context. For the common remote-file-in-a-query
+	// path the handle's lifetime nests inside this ClientContext, so the pointer stays valid.
+	if (auto context = FileOpener::TryGetClientContext(opener)) {
+		result->interrupt_flag = &context->interrupted;
+	}
+
 	unique_ptr<KeyValueSecretReader> settings_reader;
 	if (info && !S3FileSystem::TryGetPrefix(info->file_path).empty()) {
 		// This is an S3-type url, we should
@@ -281,12 +290,14 @@ static HTTPException MakeConsistencyAwareError(const HTTPResponse &response, boo
 unique_ptr<HTTPResponse> HTTPFileSystem::RunHeadRequest(string url, HTTPHeaders header_map, HTTPFSParams &http_params,
                                                         HTTPSendCallback send_request) {
 	HeadRequestInfo head_request(url, header_map, http_params);
+	head_request.cancellation = http_params.interrupt_flag;
 	return send_request(head_request);
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::RunDeleteRequest(string url, HTTPHeaders header_map, HTTPFSParams &http_params,
                                                           HTTPSendCallback send_request) {
 	DeleteRequestInfo delete_request(url, header_map, http_params);
+	delete_request.cancellation = http_params.interrupt_flag;
 	return send_request(delete_request);
 }
 
@@ -294,6 +305,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunPostRequest(string url, HTTPHeaders 
                                                         string &buffer_out, char *buffer_in, idx_t buffer_in_len,
                                                         HTTPSendCallback send_request) {
 	PostRequestInfo post_request(url, header_map, http_params, const_data_ptr_cast(buffer_in), buffer_in_len);
+	post_request.cancellation = http_params.interrupt_flag;
 	auto result = send_request(post_request);
 	buffer_out = std::move(post_request.buffer_out);
 	return result;
@@ -304,6 +316,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunPutRequest(string url, HTTPHeaders h
                                                        HTTPSendCallback send_request) {
 	PutRequestInfo put_request(url, header_map, http_params, const_data_ptr_cast(buffer_in), buffer_in_len,
 	                           content_type);
+	put_request.cancellation = http_params.interrupt_flag;
 	return send_request(put_request);
 }
 
@@ -349,6 +362,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRequest(HTTPFileHandle &hfh, stri
 		    return true;
 	    });
 
+	get_request.cancellation = http_params.interrupt_flag;
 	return send_request(get_request);
 }
 
@@ -430,6 +444,7 @@ unique_ptr<HTTPResponse> HTTPFileSystem::RunGetRangeRequest(HTTPFileHandle &hfh,
 	    });
 
 	get_request.try_request = auto_fallback_to_full_file_download;
+	get_request.cancellation = http_params.interrupt_flag;
 	auto response = send_request(get_request);
 	if (response && !response->HasRequestError() && response->Success() && buffer_out != nullptr &&
 	    out_offset != buffer_out_len) {

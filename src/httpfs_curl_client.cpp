@@ -341,8 +341,14 @@ public:
 			curl_easy_setopt(*curl, CURLOPT_CURLU, url);
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
+			ArmCancellation(info);
+
 			res = curl->Execute();
 			curl_url_cleanup(url);
+		}
+
+		if (auto cancelled = CheckCancelled(res, info, "GET")) {
+			return cancelled;
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -429,11 +435,17 @@ public:
 			// Apply headers
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
+			ArmCancellation(info);
+
 			res = curl->Execute();
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDS, nullptr);
 			curl_easy_setopt(*curl, CURLOPT_POSTFIELDSIZE, 0);
 			curl_url_cleanup(url);
+		}
+
+		if (auto cancelled = CheckCancelled(res, info, "PUT")) {
+			return cancelled;
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -474,11 +486,17 @@ public:
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
+			ArmCancellation(info);
+
 			// Execute HEAD request
 			res = curl->Execute();
 			curl_easy_setopt(*curl, CURLOPT_NOBODY, 0L);
 			curl_easy_setopt(*curl, CURLOPT_HTTPGET, 1L);
 			curl_url_cleanup(url);
+		}
+
+		if (auto cancelled = CheckCancelled(res, info, "HEAD")) {
+			return cancelled;
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -515,10 +533,16 @@ public:
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
+			ArmCancellation(info);
+
 			// Execute DELETE request
 			res = curl->Execute();
 			curl_easy_setopt(*curl, CURLOPT_CUSTOMREQUEST, nullptr);
 			curl_url_cleanup(url);
+		}
+
+		if (auto cancelled = CheckCancelled(res, info, "DELETE")) {
+			return cancelled;
 		}
 
 		// Get HTTP response status code
@@ -567,14 +591,7 @@ public:
 			// Add headers if any
 			curl_easy_setopt(*curl, CURLOPT_HTTPHEADER, curl_headers ? curl_headers.headers : nullptr);
 
-			// Arm the cancellation progress hook for this transfer when the caller supplied a
-			// flag. It is disarmed again by the next request's ResetRequestInfo(). XFERINFODATA
-			// is a const pointer; curl's setopt takes void*, hence the cast.
-			if (info.cancellation) {
-				curl_easy_setopt(*curl, CURLOPT_XFERINFOFUNCTION, CancelXferInfo);
-				curl_easy_setopt(*curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool> *>(info.cancellation.get()));
-				curl_easy_setopt(*curl, CURLOPT_NOPROGRESS, 0L);
-			}
+			ArmCancellation(info);
 
 			// Execute POST request
 			res = curl->Execute();
@@ -585,17 +602,8 @@ public:
 			curl_url_cleanup(url);
 		}
 
-		// A transfer aborted because the caller's cancellation flag was observed set comes back
-		// as CURLE_ABORTED_BY_CALLBACK. Keying off the flag distinguishes a caller cancel from
-		// the dispatcher's shutdown-path abort (both are terminal — ShouldRetry() is false for a
-		// cancelled response — so the only thing the rare overlap affects is the error string).
-		if (res == CURLE_ABORTED_BY_CALLBACK && info.cancellation &&
-		    info.cancellation->load(std::memory_order_relaxed)) {
-			auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
-			response->cancelled = true;
-			response->request_error = "HTTP POST request was cancelled";
-			response->url = request_info->url;
-			return response;
+		if (auto cancelled = CheckCancelled(res, info, "POST")) {
+			return cancelled;
 		}
 
 		curl_easy_getinfo(*curl, CURLINFO_RESPONSE_CODE, &request_info->response_code);
@@ -621,6 +629,36 @@ public:
 	}
 
 private:
+	// Arm the cancellation progress hook for this transfer when the caller supplied a flag. It is
+	// disarmed again by the next request's ResetRequestInfo(). XFERINFODATA is a const pointer;
+	// curl's setopt takes void*, hence the cast. Works for every HTTP method: the progress hook
+	// fires throughout the transfer (upload, the wait for the response, and download), so it
+	// cancels mid-flight even for bodyless GET/HEAD/DELETE where the write callback never runs.
+	void ArmCancellation(const BaseRequest &info) {
+		if (info.cancellation) {
+			curl_easy_setopt(*curl, CURLOPT_XFERINFOFUNCTION, CancelXferInfo);
+			curl_easy_setopt(*curl, CURLOPT_XFERINFODATA, const_cast<std::atomic<bool> *>(info.cancellation.get()));
+			curl_easy_setopt(*curl, CURLOPT_NOPROGRESS, 0L);
+		}
+	}
+
+	// A transfer aborted because the caller's cancellation flag was observed set comes back as
+	// CURLE_ABORTED_BY_CALLBACK. Keying off the flag distinguishes a caller cancel from the
+	// dispatcher's shutdown-path abort (both are terminal — ShouldRetry() is false for a cancelled
+	// response — so the only thing the rare overlap affects is the error string). Returns a
+	// terminal cancelled HTTPResponse when the flag fired, else nullptr so the caller proceeds.
+	unique_ptr<HTTPResponse> CheckCancelled(CURLcode res, const BaseRequest &info, const char *method) {
+		if (res == CURLE_ABORTED_BY_CALLBACK && info.cancellation &&
+		    info.cancellation->load(std::memory_order_relaxed)) {
+			auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+			response->cancelled = true;
+			response->request_error = "HTTP " + string(method) + " request was cancelled";
+			response->url = request_info->url;
+			return response;
+		}
+		return nullptr;
+	}
+
 	CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
 		auto &httpfs_params = params.Cast<HTTPFSParams>();
 
