@@ -34,6 +34,19 @@ jobs:
       VCPKG_TARGET_TRIPLET: x64-linux
       PYTHON_HTTP_SERVER_URL: http://localhost:8008
       PYTHON_HTTP_SERVER_DIR: /tmp/python_test_server
+      # Haybarn: ccache tuning — mirror extension-ci-tools so this standalone
+      # job shares the same warm cache instead of GitHub's per-branch local
+      # cache, which never warms here: this workflow has no push trigger, so the
+      # haybarn base branch never builds a cache for PRs to inherit, and a PR's
+      # own cache is invisible to every other PR (refs/pull/<n>/merge scope).
+      # Strip the absolute workspace prefix from hashes, tolerate __DATE__/
+      # header-mtime variance, and hash the compiler binary content. R2
+      # (Cloudflare Worker, same bucket/auth as vcpkg) is the shared L2 backend.
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "1"
+      CCACHE_SLOPPINESS: "time_macros,include_file_mtime,pch_defines"
+      CCACHE_COMPILERCHECK: "content"
+      CCACHE_REMOTE_STORAGE: "http://haybarn-vcpkg-cache.rusty-bb6.workers.dev/ccache|bearer-token=${{ secrets.HAYBARN_VCPKG_TOKEN }}|connect-timeout=10000|operation-timeout=30000"
 
     steps:
       - uses: actions/checkout@v4
@@ -51,9 +64,16 @@ jobs:
 
       - name: Setup Ccache
         uses: hendrikmuhs/ccache-action@main
+        continue-on-error: true
         with:
-          key: ${{ github.job }}
-          save: ${{ github.ref == 'refs/heads/main' || github.repository != 'duckdb/duckdb-httpfs' }}
+          # GitHub Actions local cache disabled (parity with extension-ci-tools):
+          # it never warms for PRs here (no push trigger on haybarn -> no
+          # base-branch cache to inherit) and is branch-scoped. The shared R2
+          # backend (CCACHE_REMOTE_STORAGE, set in env above) is the real cache.
+          # The action is still used to install ccache and set CCACHE_DIR.
+          key: ccache-minio-httpfs
+          save: 'false'
+          read-only: 'true'
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11.1
