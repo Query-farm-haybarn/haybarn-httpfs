@@ -68,29 +68,26 @@ static int CancelXferInfo(void *clientp, curl_off_t, curl_off_t, curl_off_t, cur
 	return (flag && flag->load(std::memory_order_relaxed)) ? 1 : 0;
 }
 
-// Normalize an HTTP header field name to RFC 7230 §3.2 case-insensitive
-// equivalence by transforming to title-case (first letter and any letter
-// following '-' uppercased, the rest lowercased). RFC 9113 §8.2.1 requires
-// HTTP/2 header names on the wire to be lowercase, so without this
-// normalization a consumer doing `response.headers['Content-Range']`
-// gets NULL on h2 and the value on h1. Title-case is the de-facto convention
-// (Python requests, Go net/http, Node http all do this).
+// Normalize an HTTP header field name to lowercase. Header names are
+// case-insensitive (RFC 7230 §3.2) and RFC 9113 §8.2.1 requires HTTP/2 names to
+// be lowercase on the wire, so lowercase is the canonical form that is identical
+// across h1 and h2 — without normalization an h2 peer returns lowercase names
+// while an h1 peer returns the server's mixed case.
+//
+// The engine's HTTPHeaders map is case-insensitive, so C++ lookups
+// (response.GetHeaderValue("Content-Encoding"), etc.) work regardless of how we
+// store names. But the response headers are also surfaced in *case-sensitive*
+// contexts where the casing must match exactly:
+//   - the duckdb_logs_parsed('HTTP') SQL MAP, e.g. response.headers['x-amz-version-id']
+//   - the `header_<name>` keys flattened into HTTPException::extra_info (an
+//     unordered_map), read by the S3 region-redirect path as
+//     `header_x-amz-bucket-region` (s3fs.cpp)
+// Those consumers — and AWS's own x-amz-* headers — are lowercase, so we
+// normalize to lowercase to match. (A previous title-case scheme fixed
+// title-case lookups like ['Content-Range'] but broke these lowercase ones,
+// silently disabling S3 region-redirect following under the curl client.)
 static std::string NormalizeHeaderName(const std::string &raw) {
-	std::string out;
-	out.reserve(raw.size());
-	bool at_word_start = true;
-	for (char c : raw) {
-		if (c == '-') {
-			out.push_back('-');
-			at_word_start = true;
-		} else if (at_word_start) {
-			out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
-			at_word_start = false;
-		} else {
-			out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-		}
-	}
-	return out;
+	return StringUtil::Lower(raw);
 }
 
 static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, void *userp) {

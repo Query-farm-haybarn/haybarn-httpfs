@@ -214,7 +214,12 @@ private:
 			                     "client (SET httpfs_client_implementation = 'curl') or configure the server to "
 			                     "disable transfer compression.";
 			for (auto &entry : response.headers) {
-				err->headers.Insert(entry.first, entry.second);
+				// Lowercase header names for parity with the curl client and a
+				// canonical h1/h2-identical form (see NormalizeHeaderName in
+				// httpfs_curl_client.cpp): case-sensitive consumers like the
+				// duckdb_logs_parsed('HTTP') SQL map and HTTPException::extra_info
+				// expect lowercase. C++ HTTPHeaders lookups stay case-insensitive.
+				err->headers.Insert(StringUtil::Lower(entry.first), entry.second);
 			}
 			return err;
 		}
@@ -224,7 +229,9 @@ private:
 		result->body = response.body;
 		result->reason = response.reason;
 		for (auto &entry : response.headers) {
-			result->headers.Insert(entry.first, entry.second);
+			// Lowercase header names for parity with the curl client (see the
+			// note on the error path above).
+			result->headers.Insert(StringUtil::Lower(entry.first), entry.second);
 		}
 		return result;
 	}

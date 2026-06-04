@@ -23,7 +23,7 @@ HEAD	https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv	OK_200	OK
 GET	https://github.com/duckdb/duckdb/raw/main/data/csv/customer.csv	PartialContent_206	Partial Content
 
 query II
-SELECT request.headers['Range'], response.headers['Content-Range']
+SELECT request.headers['Range'], response.headers['content-range']
 FROM duckdb_logs_parsed('HTTP')
 WHERE request.type='GET'
 ----
