@@ -27,7 +27,7 @@ jobs:
       vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
       extension_name: httpfs
-      duckdb_version: haybarn-v1.5.3-rc7
+      duckdb_version: haybarn-v1.5.5-rc1
       ci_tools_version: haybarn
       override_duckdb_repository: 'https://github.com/Query-farm-haybarn/haybarn'
       override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
@@ -46,7 +46,7 @@ jobs:
     secrets: inherit
     with:
       extension_name: httpfs
-      duckdb_version: haybarn-v1.5.3-rc7
+      duckdb_version: haybarn-v1.5.5-rc1
       ci_tools_version: haybarn
       override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
       # Push-to-haybarn writes BOTH the versioned CalVer path AND the rolling-
@@ -64,7 +64,7 @@ jobs:
     uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@f0dc2977a2be5688dfa4048b9fc45e6a3730e812
     with:
       extension_name: httpfs
-      duckdb_version: haybarn-v1.5.3-rc7
+      duckdb_version: haybarn-v1.5.5-rc1
       ci_tools_version: haybarn
       override_ci_tools_repository: 'Query-farm-haybarn/haybarn-extension-ci-tools'
       extra_toolchains: 'python3'
