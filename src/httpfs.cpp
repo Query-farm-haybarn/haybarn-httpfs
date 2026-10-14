@@ -552,9 +552,8 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 	auto response = RunGetRequest(
 	    hfh, url, header_map, hfh.http_params,
 	    [&](const HTTPResponse &response) {
-		    return MakeConsistencyAwareError(
-		        response, sent_precondition, handle.path, global_metadata_cache.get(), "",
-		        [&](const HTTPResponse &r) { return GetHTTPError(handle, r, url); });
+		    return MakeConsistencyAwareError(response, sent_precondition, handle.path, global_metadata_cache.get(), "",
+		                                     [&](const HTTPResponse &r) { return GetHTTPError(handle, r, url); });
 	    },
 	    [&](BaseRequest &request) { return hfh.http_params.http_util.Request(request, http_client); });
 	hfh.StoreClient(std::move(http_client));
