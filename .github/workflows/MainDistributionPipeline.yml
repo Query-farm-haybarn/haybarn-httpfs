@@ -22,7 +22,7 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@f0dc2977a2be5688dfa4048b9fc45e6a3730e812
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@caedd670666aff52b1be51d7440b0fd257df47ac
     secrets:
       vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
@@ -42,7 +42,7 @@ jobs:
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@f0dc2977a2be5688dfa4048b9fc45e6a3730e812
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@caedd670666aff52b1be51d7440b0fd257df47ac
     secrets: inherit
     with:
       extension_name: httpfs
@@ -61,7 +61,7 @@ jobs:
 
   code-quality:
     name: Code Quality
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@f0dc2977a2be5688dfa4048b9fc45e6a3730e812
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@caedd670666aff52b1be51d7440b0fd257df47ac
     with:
       extension_name: httpfs
       duckdb_version: haybarn-v1.5.6-rc1
