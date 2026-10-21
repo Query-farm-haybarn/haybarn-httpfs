@@ -3,6 +3,7 @@ target_sources(
   PRIVATE browser_adapter_test.cpp
           connection_reuse_test.cpp
           fd_exhaustion_test.cpp
+          haybarn_http_test.cpp
           http_cache_policy_test.cpp
           hffs_test.cpp
           http_request_session_test.cpp
