@@ -202,7 +202,21 @@ struct RequestInfo {
 	string body = "";
 	uint16_t response_code = 0;
 	vector<HTTPHeaders> header_collection;
+	//! Haybarn: Accept-Encoding: identity was sent, so curl does not decode the body.
+	bool sent_identity_only = false;
 };
+
+//! Haybarn: the response Content-Encoding when it is a real transformation (not absent or "identity").
+static string GetAppliedContentEncoding(const HTTPHeaders &headers) {
+	if (!headers.HasHeader("Content-Encoding")) {
+		return string();
+	}
+	auto value = headers.GetHeaderValue("Content-Encoding");
+	if (value.empty() || StringUtil::CIEquals(value, "identity")) {
+		return string();
+	}
+	return value;
+}
 
 struct CURLGlobalState {
 	annotated_mutex lock;
@@ -531,6 +545,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		RequireIdentityResponse(curl_headers);
 		request_info->url = info.url;
 
 		CURLcode res;
@@ -558,6 +573,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse();
 		if (!info.headers.HasHeader("Content-Type")) {
 			curl_headers.Add("Content-Type: " + info.content_type);
 		}
@@ -600,6 +616,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		RequireIdentityResponse(curl_headers);
 		request_info->url = info.url;
 		// transform parameters
 
@@ -635,6 +652,7 @@ public:
 			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse();
 		// transform parameters
 		request_info->url = info.url;
 
@@ -668,6 +686,7 @@ public:
 			state->RecordRequest(RequestType::OPTIONS_REQUEST);
 		}
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse();
 		request_info->url = info.url;
 
 		CURLcode res;
@@ -699,6 +718,7 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
+		AllowCompressedResponse();
 		if (!info.headers.HasHeader("Content-Type")) {
 			const string content_type = "Content-Type: application/octet-stream";
 			curl_headers.Add(content_type.c_str());
@@ -783,13 +803,39 @@ private:
 
 	static CURLRequestHeaders TransformHeadersCurl(const HTTPHeaders &header_map, const HTTPParams &params) {
 		CURLRequestHeaders curl_headers;
+		// Haybarn: the client owns the Accept-Encoding policy per method, so caller-supplied values are dropped.
 		for (auto &entry : header_map) {
-			curl_headers.Add(entry.first, entry.second);
+			if (!StringUtil::CIEquals(entry.first, "Accept-Encoding")) {
+				curl_headers.Add(entry.first, entry.second);
+			}
 		}
 		for (auto &entry : params.extra_headers) {
-			curl_headers.Add(entry.first, entry.second);
+			if (!StringUtil::CIEquals(entry.first, "Accept-Encoding")) {
+				curl_headers.Add(entry.first, entry.second);
+			}
 		}
 		return curl_headers;
+	}
+
+	// Haybarn: GET and HEAD belong to the file-read lifecycle and get Accept-Encoding: identity, with no decoding. A
+	// HEAD's Content-Length is the file size, Content-Range applies to the encoded bytes (RFC 9110 §14.1.2), and a full
+	// GET's headers become the file's metadata before the body arrives, so all of them must describe the object bytes.
+	// A Content-Encoding on such a response is passed through untouched, as before: S3 returns an object's stored
+	// Content-Encoding metadata even for identity requests, and those bytes are the object's bytes.
+	// CURLOPT_ACCEPT_ENCODING would also make curl decode whatever encoding it supports, so the header is sent by
+	// hand and the option stays NULL: bytes arrive exactly as the server sent them.
+	void RequireIdentityResponse(CURLRequestHeaders &curl_headers) {
+		curl->SetOption(CURLOPT_ACCEPT_ENCODING, nullptr);
+		curl_headers.Add("Accept-Encoding", "identity");
+		request_info->sent_identity_only = true;
+	}
+
+	// Haybarn: PUT, POST, DELETE and OPTIONS sit outside the file-read lifecycle and their response bodies (S3
+	// multipart-complete XML, HuggingFace JSON, ...) compress well. The empty string advertises every encoding this
+	// libcurl was built with and decodes transparently.
+	void AllowCompressedResponse() {
+		curl->SetOption(CURLOPT_ACCEPT_ENCODING, "");
+		request_info->sent_identity_only = false;
 	}
 
 	void ResetRequestInfo() {
@@ -802,6 +848,7 @@ private:
 		request_info->body = "";
 		request_info->url = "";
 		request_info->response_code = 0;
+		request_info->sent_identity_only = false;
 	}
 
 	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res, bool include_body = true) {
@@ -822,6 +869,12 @@ private:
 		}
 		response->url = request_info->url;
 		response->reason = HTTPUtil::GetStatusMessage(status_code);
+		// Haybarn: when curl transparently decoded a content-encoded body, the wire Content-Length describes the
+		// encoded representation and Content-Encoding a transformation already undone. Hand back headers that match
+		// the bytes in the body.
+		const bool body_was_decoded = include_body && !request_info->sent_identity_only &&
+		                              !request_info->header_collection.empty() &&
+		                              !GetAppliedContentEncoding(request_info->header_collection.back()).empty();
 		if (!request_info->header_collection.empty()) {
 			auto &response_headers = request_info->header_collection.back();
 			for (auto &header : response_headers) {
@@ -829,10 +882,17 @@ private:
 				if (header.first == "__RESPONSE_STATUS__") {
 					continue;
 				}
+				if (body_was_decoded && (StringUtil::CIEquals(header.first, "Content-Length") ||
+				                         StringUtil::CIEquals(header.first, "Content-Encoding"))) {
+					continue;
+				}
 				for (auto &value : response_headers.GetHeaderValues(header.first)) {
 					response->headers.Append(header.first, std::move(value));
 				}
 			}
+		}
+		if (body_was_decoded) {
+			response->headers.Insert("content-length", to_string(response->body.size()));
 		}
 		// ResetRequestInfo();
 		return response;

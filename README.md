@@ -36,3 +36,25 @@ Some tests querying remote resources can be run already without further setup:
 ./build/release/test/unittest
 ```
 Further integration testing uses a local MinIO setup using Docker. See the [testing documentation for more information on how to set this up locally](test).
+
+## Response-side compression (`Accept-Encoding`)
+
+The default `curl` client transparently handles compressed HTTP responses
+(gzip, deflate, brotli, zstd — whichever encodings the bundled libcurl was
+built with) for API-style requests, and asks for byte-exact responses for
+everything that reads a file.
+
+| Method                          | `Accept-Encoding` | Why |
+|---------------------------------|-------------------|-----|
+| `GET` (range and full)          | `identity`        | `Content-Range` applies to the encoded sequence (RFC 9110 §14.1.2), and a full `GET`'s headers become the file's metadata (size, ETag) before its body arrives. |
+| `HEAD`                          | `identity`        | The response `Content-Length` is used as the file size. |
+| `POST` / `PUT` / `DELETE` / `OPTIONS` | negotiate   | Outside the file-read lifecycle; S3 multipart-complete XML and HuggingFace JSON compress well. Curl decodes, and the response's `Content-Length` is rewritten to the decoded size. |
+
+Caller-supplied `Accept-Encoding` headers are always dropped; the client owns
+this policy. Identity requests are never decoded: an object stored with a
+`Content-Encoding` (e.g. an S3 object uploaded with `Content-Encoding: gzip`)
+is read as the bytes it was stored as, as before.
+
+The optional `httplib` client (`SET httpfs_client_implementation = 'httplib'`)
+sends `Accept-Encoding: identity` on every request; use the `curl` client for
+response compression.
