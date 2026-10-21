@@ -1,5 +1,10 @@
 name: Integration Tests
-on: [push, pull_request,repository_dispatch]
+# Haybarn: push/schedule triggers removed — this standalone test workflow doesn't gate any
+# production artifact; the core engine's haybarn-extensions.yml is the canonical builder.
+on:
+  pull_request:
+  repository_dispatch:
+  workflow_dispatch:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
   cancel-in-progress: true
@@ -7,10 +12,13 @@ defaults:
   run:
     shell: bash
 
+env:
+  X_VCPKG_ASSET_SOURCES: 'clear;x-azurl,https://haybarn-vcpkg-cache.rusty-bb6.workers.dev/assets/,,read'
+
 jobs:
   linux-tests-httpfs:
     name: MinIO Tests
-    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-x64' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     env:
       S3_TEST_SERVER_AVAILABLE: 1
       AWS_DEFAULT_REGION: eu-west-1
@@ -26,6 +34,13 @@ jobs:
       VCPKG_TARGET_TRIPLET: x64-linux
       PYTHON_HTTP_SERVER_URL: http://localhost:8008
       PYTHON_HTTP_SERVER_DIR: /tmp/python_test_server
+      # Haybarn: share the extension-ci-tools R2 ccache instead of GitHub's branch-scoped local cache, which never
+      # warms here (no push trigger, and a PR's cache is invisible to other PRs).
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "1"
+      CCACHE_SLOPPINESS: "time_macros,include_file_mtime,pch_defines"
+      CCACHE_COMPILERCHECK: "content"
+      CCACHE_REMOTE_STORAGE: "http://haybarn-vcpkg-cache.rusty-bb6.workers.dev/ccache|bearer-token=${{ secrets.HAYBARN_VCPKG_TOKEN }}|connect-timeout=10000|operation-timeout=30000"
 
     steps:
       - uses: actions/checkout@v4
@@ -43,9 +58,12 @@ jobs:
 
       - name: Setup Ccache
         uses: hendrikmuhs/ccache-action@main
+        continue-on-error: true
         with:
-          key: ${{ github.job }}
-          save: ${{ github.ref == 'refs/heads/main' || github.repository != 'duckdb/duckdb-httpfs' }}
+          # Installs ccache and sets CCACHE_DIR; the R2 backend above is the real cache.
+          key: ccache-minio-httpfs
+          save: 'false'
+          read-only: 'true'
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11.1
