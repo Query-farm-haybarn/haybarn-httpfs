@@ -270,7 +270,8 @@ private:
 		result->body = response.body;
 		result->reason = response.reason;
 		for (auto &entry : response.headers) {
-			result->headers.Append(entry.first, entry.second);
+			// Haybarn: lowercase names for parity with the curl client (see NormalizeHeaderName there).
+			result->headers.Append(StringUtil::Lower(entry.first), entry.second);
 		}
 		return result;
 	}

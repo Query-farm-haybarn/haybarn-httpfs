@@ -23,6 +23,16 @@ static size_t RequestWriteCallback(void *contents, size_t size, size_t nmemb, vo
 	return total_size;
 }
 
+// Haybarn: normalize response header field names to lowercase. Names are case-insensitive (RFC 9110 §5.1) and
+// HTTP/2 requires them lowercase on the wire (RFC 9113 §8.2.1), so lowercase is the one form that is identical for h1
+// and h2 peers. C++ lookups go through the case-insensitive HTTPHeaders map either way, but response headers also
+// surface where the case must match exactly: the duckdb_logs_parsed('HTTP') MAP (response.headers['content-range'])
+// and the header_<name> keys of HTTPException::extra_info, read by the S3 region redirect as
+// header_x-amz-bucket-region. Those consumers, and AWS's own x-amz-* headers, are lowercase.
+static string NormalizeHeaderName(const string &name) {
+	return StringUtil::Lower(name);
+}
+
 static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 	auto total_size = size * nmemb;
 	string header(char_ptr_cast(contents), total_size);
@@ -54,7 +64,7 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 		if (!value.empty() && value.front() == ' ') {
 			value.erase(0, 1);
 		}
-		header_collection.back().Append(std::move(name), std::move(value));
+		header_collection.back().Append(NormalizeHeaderName(name), std::move(value));
 	}
 	// TODO: log headers that don't follow the header format
 
