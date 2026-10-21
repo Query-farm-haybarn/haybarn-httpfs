@@ -31,6 +31,8 @@ struct HTTPReadConfig {
 	string etag;
 	bool validate_etag = false;
 	bool auto_fallback_to_full_download = false;
+	//! Haybarn: compare ETags weakly (RFC 9110 §8.8.3.2); set for GETs that negotiate response compression
+	bool weak_etag_comparison = false;
 };
 
 class RangeRequestNotSupportedException {
@@ -83,6 +85,10 @@ protected:
 	virtual HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const;
 	//! Perform a HEAD request to get the file info (if not yet loaded)
 	void LoadFileInfo();
+	//! Haybarn: whether a full GET of this file may negotiate response compression. False for S3/GCS, which store
+	//! bytes as uploaded, and for paths naming an already-compressed file, where a stored Content-Encoding would
+	//! otherwise be decoded behind the reader's back.
+	virtual bool CanNegotiateCompression() const;
 	void InitializeLogger(FileOpener &opener);
 
 	virtual void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) DUCKDB_EXCLUDES(cache_policy_lock);
@@ -123,6 +129,8 @@ public:
 	bool write_overwrite_mode = false;
 	//! Set when opened with FILE_FLAGS_NULL_IF_NOT_EXISTS and the server answered 404
 	bool file_not_found = false;
+	//! Haybarn: the HEAD reported a text-like Content-Type and no Content-Encoding
+	bool compressible_content = false;
 
 	//! Per-path state shared by all handles in this query
 	shared_ptr<HTTPFileState> file_state;

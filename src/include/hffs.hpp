@@ -69,6 +69,12 @@ public:
 	}
 	~HFFileHandle() override;
 
+protected:
+	//! Haybarn: Hugging Face requests keep their own GET path, which never negotiates compression
+	bool CanNegotiateCompression() const override {
+		return false;
+	}
+
 private:
 	ParsedHFUrl parsed_url;
 };

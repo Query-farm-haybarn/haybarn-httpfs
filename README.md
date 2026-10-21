@@ -39,21 +39,44 @@ Further integration testing uses a local MinIO setup using Docker. See the [test
 
 ## Response-side compression (`Accept-Encoding`)
 
-The default `curl` client transparently handles compressed HTTP responses
-(gzip, deflate, brotli, zstd — whichever encodings the bundled libcurl was
-built with) for API-style requests, and asks for byte-exact responses for
-everything that reads a file.
+The default `curl` client negotiates response compression (gzip, deflate,
+brotli, zstd — whichever encodings the bundled libcurl was built with) when a
+whole file is downloaded, and asks for byte-exact responses whenever bytes
+must line up with the object.
 
-| Method                          | `Accept-Encoding` | Why |
-|---------------------------------|-------------------|-----|
-| `GET` (range and full)          | `identity`        | `Content-Range` applies to the encoded sequence (RFC 9110 §14.1.2), and a full `GET`'s headers become the file's metadata (size, ETag) before its body arrives. |
-| `HEAD`                          | `identity`        | The response `Content-Length` is used as the file size. |
-| `POST` / `PUT` / `DELETE` / `OPTIONS` | negotiate   | Outside the file-read lifecycle; S3 multipart-complete XML and HuggingFace JSON compress well. Curl decodes, and the response's `Content-Length` is rewritten to the decoded size. |
+| Request | `Accept-Encoding` | Why |
+|---------|-------------------|-----|
+| Range `GET` | `identity` | `Content-Range` applies to the encoded sequence (RFC 9110 §14.1.2). |
+| `HEAD` | `identity` | The response `Content-Length` is used as the file size. |
+| Whole-file `GET` of an HTTP(S) URL | negotiate | Curl decodes; the file's size and metadata come from the decoded bytes and no `Content-Encoding` is reported. |
+| `POST` / `PUT` / `DELETE` / `OPTIONS` | negotiate | S3 multipart-complete XML, HuggingFace JSON, ... compress well. |
+| S3 / GCS / Hugging Face, and URLs of already-compressed files (`.gz`, `.zst`, `.br`, `.bz2`, `.xz`, `.zip`, ...) | `identity` | Served as stored; decoding a stored `Content-Encoding` would change the bytes behind the reader's back. |
 
-Caller-supplied `Accept-Encoding` headers are always dropped; the client owns
-this policy. Identity requests are never decoded: an object stored with a
+Identity requests are never decoded: an object stored with a
 `Content-Encoding` (e.g. an S3 object uploaded with `Content-Encoding: gzip`)
-is read as the bytes it was stored as, as before.
+is read as the bytes it was stored as.
+
+**Small text files are read whole.** A file whose `HEAD` reports a text-like
+`Content-Type` (`text/*`, JSON, XML, JavaScript, CSV, YAML, ...) and no
+`Content-Encoding`, and that is at most `http_compressed_download_threshold`
+bytes (default 16 MiB), is fetched with one compressed `GET` instead of
+identity range requests, so `read_text`, `read_blob`, `read_csv` and
+`read_json` of web pages and small text files get compression. Binary formats
+(parquet and other `application/octet-stream` content) keep range reads, and
+larger text files keep streaming through range requests. The whole file is
+held in memory for the query, which is what the threshold bounds;
+`SET http_compressed_download_threshold = 0` turns this off.
+
+**ETags of compressed downloads.** A coded variant is a different
+representation (GitHub, nginx and Cloudflare answer a gzip `GET` with
+`W/"x"` for an identity `"x"`), and a strong `If-Match` could never match it.
+Up-front whole-file reads carry no ETag precondition and negotiate
+compression; their response ETag is compared with the probe's by weak
+comparison (RFC 9110 §8.8.3.2: the opaque-tags must match, the `W/` flag is
+ignored), and `If-Unmodified-Since` is kept. The one whole-file `GET` that
+does carry `If-Match` — the fallback when a server ignores ranges part-way
+through range reads of a file with a strong ETag — stays `identity`, so its
+bytes are pinned to the version already being read.
 
 The optional `httplib` client (`SET httpfs_client_implementation = 'httplib'`)
 sends `Accept-Encoding: identity` on every request; use the `curl` client for

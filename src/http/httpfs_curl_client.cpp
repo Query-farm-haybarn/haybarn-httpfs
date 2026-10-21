@@ -398,7 +398,7 @@ private:
 
 				if (result == CURLE_OK && !response_handler_called) {
 					response_handler_called = true;
-					response = client.TransformResponseCurl(result, include_body);
+					response = client.TransformResponseCurl(result, include_body, DeliveredLength());
 					if (request.response_handler) {
 						request.response_handler(*response);
 					}
@@ -409,7 +409,7 @@ private:
 			}
 			RecordMetrics();
 			if (!response) {
-				response = client.TransformResponseCurl(result, include_body);
+				response = client.TransformResponseCurl(result, include_body, DeliveredLength());
 			}
 			return response;
 		}
@@ -484,6 +484,10 @@ private:
 			return true;
 		}
 
+		optional_idx DeliveredLength() const {
+			return stream_content ? optional_idx(bytes_received) : optional_idx();
+		}
+
 		void RecordMetrics() {
 			request.bytes_received = bytes_received;
 			double starttransfer_seconds = 0;
@@ -553,7 +557,11 @@ public:
 		}
 
 		auto curl_headers = TransformHeadersCurl(info.headers, info.params);
-		RequireIdentityResponse(curl_headers);
+		if (info.params.Cast<HTTPFSParams>().negotiate_compression && !HasRangeHeader(info)) {
+			AllowCompressedResponse();
+		} else {
+			RequireIdentityResponse(curl_headers);
+		}
 		request_info->url = info.url;
 
 		CURLcode res;
@@ -850,10 +858,21 @@ private:
 		return curl_headers;
 	}
 
-	// Haybarn: GET and HEAD belong to the file-read lifecycle and get Accept-Encoding: identity, with no decoding. A
-	// HEAD's Content-Length is the file size, Content-Range applies to the encoded bytes (RFC 9110 §14.1.2), and a full
-	// GET's headers become the file's metadata before the body arrives, so all of them must describe the object bytes.
-	// A Content-Encoding on such a response is passed through untouched, as before: S3 returns an object's stored
+	static bool HasRangeHeader(const BaseRequest &info) {
+		if (info.headers.HasHeader("Range")) {
+			return true;
+		}
+		for (auto &entry : info.params.extra_headers) {
+			if (StringUtil::CIEquals(entry.first, "Range")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Haybarn: range GETs, HEAD, S3/GCS and every GET not marked negotiate_compression get Accept-Encoding: identity,
+	// with no decoding: Content-Range applies to the encoded bytes (RFC 9110 §14.1.2) and a HEAD's Content-Length is
+	// the file size. A Content-Encoding on such a response is passed through untouched: S3 returns an object's stored
 	// Content-Encoding metadata even for identity requests, and those bytes are the object's bytes.
 	// CURLOPT_ACCEPT_ENCODING would also make curl decode whatever encoding it supports, so the header is sent by
 	// hand and the option stays NULL: bytes arrive exactly as the server sent them.
@@ -863,9 +882,9 @@ private:
 		request_info->sent_identity_only = true;
 	}
 
-	// Haybarn: PUT, POST, DELETE and OPTIONS sit outside the file-read lifecycle and their response bodies (S3
-	// multipart-complete XML, HuggingFace JSON, ...) compress well. The empty string advertises every encoding this
-	// libcurl was built with and decodes transparently.
+	// Haybarn: whole-file GETs of plain HTTP(S) files and PUT, POST, DELETE and OPTIONS (S3 multipart-complete XML,
+	// HuggingFace JSON, ...) negotiate compression. The empty string advertises every encoding this libcurl was built
+	// with and decodes transparently.
 	void AllowCompressedResponse() {
 		curl->SetOption(CURLOPT_ACCEPT_ENCODING, "");
 		request_info->sent_identity_only = false;
@@ -916,7 +935,9 @@ private:
 		return response;
 	}
 
-	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res, bool include_body = true) {
+	//! streamed_length: the number of (decoded) body bytes a streamed transfer delivered, once it is known
+	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res, bool include_body = true,
+	                                               optional_idx streamed_length = optional_idx()) {
 		auto status_code = HTTPUtil::ToStatusCode(request_info->response_code);
 		auto response = make_uniq<HTTPResponse>(status_code);
 		if (res != CURLcode::CURLE_OK) {
@@ -936,9 +957,9 @@ private:
 		response->reason = HTTPUtil::GetStatusMessage(status_code);
 		// Haybarn: when curl transparently decoded a content-encoded body, the wire Content-Length describes the
 		// encoded representation and Content-Encoding a transformation already undone. Hand back headers that match
-		// the bytes in the body.
-		const bool body_was_decoded = include_body && !request_info->sent_identity_only &&
-		                              !request_info->header_collection.empty() &&
+		// the decoded bytes: the buffered body's size, or a streamed transfer's delivered byte count once it is known
+		// (none while the headers are handed over before the body).
+		const bool body_was_decoded = !request_info->sent_identity_only && !request_info->header_collection.empty() &&
 		                              !GetAppliedContentEncoding(request_info->header_collection.back()).empty();
 		if (!request_info->header_collection.empty()) {
 			auto &response_headers = request_info->header_collection.back();
@@ -956,8 +977,10 @@ private:
 				}
 			}
 		}
-		if (body_was_decoded) {
+		if (body_was_decoded && include_body) {
 			response->headers.Insert("content-length", to_string(response->body.size()));
+		} else if (body_was_decoded && streamed_length.IsValid()) {
+			response->headers.Insert("content-length", to_string(streamed_length.GetIndex()));
 		}
 		// ResetRequestInfo();
 		return response;

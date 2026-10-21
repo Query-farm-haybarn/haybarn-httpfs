@@ -178,6 +178,12 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          "Enable curl's CURLOPT_VERBOSE: protocol-level details (TLS handshake, ALPN selection, "
 	                          "HTTP/2 frame log) are printed to stderr. Useful for verifying HTTP/2 negotiation.",
 	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption(
+	    "http_compressed_download_threshold",
+	    "Files up to this size (in bytes) whose Content-Type is text-like (HTML, CSV, JSON, XML, ...) are read with a "
+	    "single full GET that negotiates response compression instead of range requests. 0 disables. Plain HTTP(S) "
+	    "only; S3 and GCS are unaffected.",
+	    LogicalType::UBIGINT, Value::UBIGINT(HTTPFSParams::DEFAULT_COMPRESSED_DOWNLOAD_THRESHOLD));
 	config.AddExtensionOption("http2_multiplex",
 	                          "Route the curl client through a process-global curl_multi dispatcher so parallel range "
 	                          "reads share a single HTTP/2 connection via N streams instead of N separate connections. "

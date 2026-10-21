@@ -112,6 +112,8 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "http_version", result->http_version, info);
 		FileOpener::TryGetCurrentSetting(opener, "httpfs_curl_verbose", result->curl_verbose, info);
 		FileOpener::TryGetCurrentSetting(opener, "http2_multiplex", result->http2_multiplex, info);
+		FileOpener::TryGetCurrentSetting(opener, "http_compressed_download_threshold",
+		                                 result->compressed_download_threshold, info);
 		auto context = FileOpener::TryGetClientContext(opener);
 		if (context) {
 			result->interrupt_context = context->shared_from_this();
@@ -1107,6 +1109,25 @@ HTTPMetadataCacheEntry HTTPFileHandle::ReadFileInfo(const HTTPResponse &response
 	return result;
 }
 
+// Haybarn: media types that are worth a compressed whole-file GET: text and the structured text formats.
+static bool IsCompressibleContentType(string content_type) {
+	auto parameters = content_type.find(';');
+	if (parameters != string::npos) {
+		content_type = content_type.substr(0, parameters);
+	}
+	StringUtil::Trim(content_type);
+	content_type = StringUtil::Lower(content_type);
+	if (StringUtil::StartsWith(content_type, "text/")) {
+		return true;
+	}
+	for (const auto &token : {"json", "xml", "javascript", "ecmascript", "csv", "yaml", "toml", "ndjson"}) {
+		if (StringUtil::Contains(content_type, token)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void HTTPFileHandle::LoadFileInfo() {
 	if (TryLoadFileInfoWithoutRequest()) {
 		return;
@@ -1116,8 +1137,28 @@ void HTTPFileHandle::LoadFileInfo() {
 	timestamp_t response_time;
 	auto response = RequestFileInfo(hfs, request_time, response_time);
 	if (response) {
+		compressible_content = response->HasHeader("Content-Type") &&
+		                       IsCompressibleContentType(response->GetHeaderValue("Content-Type")) &&
+		                       !response->HasHeader("Content-Encoding");
 		InitializeFromCacheEntry(ReadFileInfo(*response, request_time, response_time));
 	}
+}
+
+bool HTTPFileHandle::CanNegotiateCompression() const {
+	// A stored Content-Encoding on an already-compressed file (`data.csv.gz` served as Content-Encoding: gzip) would be
+	// decoded, unlike on range reads, and the reader would then misdetect the bytes.
+	auto lower_path = StringUtil::Lower(path);
+	auto query = lower_path.find_first_of("?#");
+	if (query != string::npos) {
+		lower_path = lower_path.substr(0, query);
+	}
+	for (const auto &extension :
+	     {".gz", ".gzip", ".tgz", ".zst", ".zstd", ".br", ".bz2", ".xz", ".lz4", ".zip", ".7z", ".z"}) {
+		if (StringUtil::EndsWith(lower_path, extension)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void HTTPFileHandle::InitializeLogger(FileOpener &opener) {
@@ -1227,7 +1268,14 @@ void HTTPFileHandle::InitializeFileInfo(HTTPFileSystem &hfs, optional_ptr<HTTPMe
 		const auto has_cache_state = (request_snapshot->Params().state != nullptr) && (length == 0);
 		const auto always_download = force_full_download;
 		const auto meets_threshold = (length < request_snapshot->Params().force_download_threshold) && (length != 0);
-		const auto should_full_download = has_cache_state || meets_threshold || always_download;
+		// Haybarn: a text-like file small enough to read whole (web pages, small CSV/JSON) is read with one GET that
+		// negotiates compression rather than identity range requests. Binary formats (parquet, ...) keep range reads.
+		const auto compressed_download_threshold = request_snapshot->Params().compressed_download_threshold;
+		const auto prefer_compressed_download = compressible_content && CanNegotiateCompression() &&
+		                                        compressed_download_threshold > 0 && length != 0 &&
+		                                        length <= compressed_download_threshold;
+		const auto should_full_download =
+		    has_cache_state || meets_threshold || always_download || prefer_compressed_download;
 
 		if (should_full_download) {
 			// Nothing was read under the ETag of the HEAD, the download is the version this handle reads: servers may
