@@ -109,6 +109,9 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks,
 		                                 info);
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
+		FileOpener::TryGetCurrentSetting(opener, "http_version", result->http_version, info);
+		FileOpener::TryGetCurrentSetting(opener, "httpfs_curl_verbose", result->curl_verbose, info);
+		FileOpener::TryGetCurrentSetting(opener, "http2_multiplex", result->http2_multiplex, info);
 		auto context = FileOpener::TryGetClientContext(opener);
 		Value external_cache_enabled;
 		if (context &&

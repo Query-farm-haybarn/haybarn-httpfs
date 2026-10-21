@@ -9,8 +9,9 @@ target_sources(
           http_state.cpp)
 
 if(NOT EMSCRIPTEN)
-  target_sources(httpfs_library PRIVATE httpfs_httplib_client.cpp
-                                        httpfs_curl_client.cpp)
+  target_sources(
+    httpfs_library PRIVATE httpfs_httplib_client.cpp httpfs_curl_client.cpp
+                           httpfs_curl_multi_dispatcher.cpp)
 else()
   target_sources(httpfs_library PRIVATE httpfs_client_wasm.cpp)
 endif()
