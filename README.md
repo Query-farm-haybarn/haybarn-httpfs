@@ -88,3 +88,12 @@ host are multiplexed as streams over one connection through a shared
 | `http_version`        | `auto`  | `auto` (HTTP/2 with HTTP/1.1 fallback), `1.1`, or `2.0` (fail if the peer refuses). |
 | `http2_multiplex`     | `true`  | Route transfers through the shared dispatcher so parallel reads share one HTTP/2 connection. |
 | `httpfs_curl_verbose` | `false` | Print curl's protocol log (TLS, ALPN, HTTP/2 frames) to stderr. |
+
+## Cancellation
+
+Interrupting a query (Ctrl-C, `con.interrupt()`) aborts its in-flight HTTP
+requests instead of waiting for them to finish or time out. The `curl`
+client checks for cancellation throughout every transfer (connect, upload,
+waiting for the response, download) for all methods; the `httplib` client
+can only stop while response bytes arrive. A cancelled request is never
+retried.

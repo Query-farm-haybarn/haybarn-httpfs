@@ -71,6 +71,14 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 	return total_size;
 }
 
+// Haybarn: libcurl progress callback that aborts the transfer (CURLE_ABORTED_BY_CALLBACK) once cancellation is
+// requested. It fires throughout the transfer (connect, upload, the wait for the response, download), so it cancels
+// bodyless requests and a POST still waiting for its response too. clientp is the request's BaseRequest.
+static int CancelTransferCallback(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+	auto request = static_cast<const BaseRequest *>(clientp);
+	return request && HTTPFSUtil::CancellationRequested(*request) ? 1 : 0;
+}
+
 // How long a shared DNS entry may be reused. Object stores such as S3 answer with a rotating set of
 // front-end addresses, and every client and every retry reuses whichever address the shared cache holds.
 // Curl's default of 60 seconds keeps a stalled request on the same address for the whole minute, while a
@@ -559,7 +567,11 @@ public:
 			curl->SetOption(CURLOPT_CURLU, url.Get());
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 			GetTransferState transfer(*this, info);
+			ArmCancellation(info);
 			res = curl->Execute();
+			if (auto cancelled = CheckCancelled(res, info, "GET")) {
+				return cancelled;
+			}
 			return transfer.Finish(res);
 		}
 	}
@@ -597,10 +609,14 @@ public:
 			// Apply headers
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
+			ArmCancellation(info);
 			res = curl->Execute();
 			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 			curl->SetOption(CURLOPT_POSTFIELDS, nullptr);
 			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
+		}
+		if (auto cancelled = CheckCancelled(res, info, "PUT")) {
+			return cancelled;
 		}
 
 		request_info->response_code = curl->GetResponseCode();
@@ -636,9 +652,13 @@ public:
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute HEAD request
+			ArmCancellation(info);
 			res = curl->Execute();
 			curl->SetOption(CURLOPT_NOBODY, 0L);
 			curl->SetOption(CURLOPT_HTTPGET, 1L);
+		}
+		if (auto cancelled = CheckCancelled(res, info, "HEAD")) {
+			return cancelled;
 		}
 
 		request_info->response_code = curl->GetResponseCode();
@@ -671,8 +691,12 @@ public:
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute DELETE request
+			ArmCancellation(info);
 			res = curl->Execute();
 			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
+		}
+		if (auto cancelled = CheckCancelled(res, info, "DELETE")) {
+			return cancelled;
 		}
 
 		// Get HTTP response status code
@@ -701,8 +725,12 @@ public:
 
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
+			ArmCancellation(info);
 			res = curl->Execute();
 			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
+		}
+		if (auto cancelled = CheckCancelled(res, info, "OPTIONS")) {
+			return cancelled;
 		}
 
 		request_info->response_code = curl->GetResponseCode();
@@ -746,11 +774,15 @@ public:
 			curl->SetOption(CURLOPT_HTTPHEADER, curl_headers.Get());
 
 			// Execute POST request
+			ArmCancellation(info);
 			res = curl->Execute();
 			curl->SetOption(CURLOPT_CUSTOMREQUEST, nullptr);
 			curl->SetOption(CURLOPT_POSTFIELDS, nullptr);
 			curl->SetOption(CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(0));
 			curl->SetOption(CURLOPT_POST, 0L);
+		}
+		if (auto cancelled = CheckCancelled(res, info, "POST")) {
+			return cancelled;
 		}
 
 		request_info->response_code = curl->GetResponseCode();
@@ -775,6 +807,7 @@ public:
 				curl->SetOption(CURLOPT_HEADERDATA, nullptr);
 				curl->SetOption(CURLOPT_WRITEFUNCTION, nullptr);
 				curl->SetOption(CURLOPT_WRITEDATA, nullptr);
+				DisarmCancellation();
 				curl->SetOption(CURLOPT_XOAUTH2_BEARER, nullptr);
 				curl->SetOption(CURLOPT_HTTPAUTH, CURLAUTH_NONE);
 				curl->SetOption(CURLOPT_CAINFO, nullptr);
@@ -849,6 +882,38 @@ private:
 		request_info->url = "";
 		request_info->response_code = 0;
 		request_info->sent_identity_only = false;
+		// The handle is cached and reused, so a callback armed for an earlier request must never survive into a later
+		// one: its CURLOPT_XFERINFODATA would point at a destroyed request.
+		DisarmCancellation();
+	}
+
+	void ArmCancellation(const BaseRequest &info) {
+		if (!HTTPFSUtil::CancellationArmed(info)) {
+			return;
+		}
+		curl->SetOption(CURLOPT_XFERINFOFUNCTION, CancelTransferCallback);
+		curl->SetOption(CURLOPT_XFERINFODATA, const_cast<void *>(static_cast<const void *>(&info)));
+		curl->SetOption(CURLOPT_NOPROGRESS, 0L);
+	}
+
+	void DisarmCancellation() {
+		curl->SetOption(CURLOPT_NOPROGRESS, 1L);
+		curl->SetOption(CURLOPT_XFERINFOFUNCTION, nullptr);
+		curl->SetOption(CURLOPT_XFERINFODATA, nullptr);
+	}
+
+	// A transfer aborted by CancelTransferCallback comes back as CURLE_ABORTED_BY_CALLBACK; re-checking the request
+	// tells a cancellation from the dispatcher's shutdown abort. The cancelled response is terminal (ShouldRetry() is
+	// false). Returns nullptr when the request was not cancelled.
+	unique_ptr<HTTPResponse> CheckCancelled(CURLcode res, const BaseRequest &info, const char *method) {
+		if (res != CURLE_ABORTED_BY_CALLBACK || !HTTPFSUtil::CancellationRequested(info)) {
+			return nullptr;
+		}
+		auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
+		response->cancelled = true;
+		response->request_error = "HTTP " + string(method) + " request was cancelled";
+		response->url = request_info->url;
+		return response;
 	}
 
 	unique_ptr<HTTPResponse> TransformResponseCurl(CURLcode res, bool include_body = true) {
