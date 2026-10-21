@@ -49,11 +49,12 @@ public:
 	operator CURL *() { // NOLINT(google-explicit-constructor)
 		return curl;
 	}
-	CURLcode Execute() {
-		errno = 0;
-		auto result = curl_easy_perform(curl);
-		execute_errno = errno;
-		return result;
+	//! Runs the configured transfer. With multi dispatch enabled (the caller opted into HTTP/2 stream
+	//! multiplexing) the transfer goes through the process-global curl_multi dispatcher instead of
+	//! curl_easy_perform; it is still synchronous from the caller's point of view.
+	CURLcode Execute();
+	void SetUseMultiDispatch(bool value) {
+		use_multi_dispatch = value;
 	}
 	//! errno as the last transfer left it, telling apart failures curl reports by the step that failed.
 	int GetExecuteErrno() const {
@@ -71,6 +72,9 @@ public:
 private:
 	CURL *curl = nullptr;
 	int execute_errno = 0;
+	bool use_multi_dispatch = false;
+	//! Whether a transfer of this handle already went through the multi dispatcher
+	bool dispatched_before = false;
 };
 
 class CURLRequestHeaders {

@@ -78,6 +78,15 @@ public:
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
 	idx_t force_download_threshold = 0;
+	//! Haybarn: HTTP version preference for the curl client: "auto" (HTTP/2 over TLS via ALPN, falling back to
+	//! HTTP/1.1), "1.1" (force HTTP/1.1) or "2.0" (force HTTP/2). Ignored by the httplib and browser clients.
+	string http_version = "auto";
+	//! Haybarn: enable CURLOPT_VERBOSE (TLS handshake, ALPN selection and HTTP/2 frames on stderr).
+	bool curl_verbose = false;
+	//! Haybarn: route curl transfers through the process-global curl_multi dispatcher. CURLOPT_PIPEWAIT is a no-op
+	//! for curl_easy_perform, so HTTP/2 stream multiplexing across worker threads needs curl_multi: N parallel range
+	//! reads then share one TCP+TLS connection per peer. HTTP/1.1 peers get an ordinary connection pool.
+	bool http2_multiplex = true;
 
 private:
 	friend class HTTPFSUtil;

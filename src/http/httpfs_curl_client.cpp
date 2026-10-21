@@ -11,6 +11,7 @@
 
 #ifndef __EMSCRIPTEN__
 #include "http/httpfs_curl_client.hpp"
+#include "http/httpfs_curl_multi_dispatcher.hpp"
 #endif
 
 namespace duckdb {
@@ -144,6 +145,23 @@ CURLHandle::~CURLHandle() {
 	curl_easy_cleanup(curl);
 }
 
+CURLcode CURLHandle::Execute() {
+	errno = 0;
+	CURLcode result;
+	if (use_multi_dispatch) {
+		// The dispatcher's connections are shared by every handle, while the transport manager treats a new client
+		// as a new connection (a retry on a fresh connection, invalidation, httpfs_connection_caching=false). So a
+		// handle's first dispatched transfer opens its own connection; later ones may multiplex onto any.
+		SetOption(CURLOPT_FRESH_CONNECT, dispatched_before ? 0L : 1L);
+		result = CurlMultiDispatcher::Execute(curl);
+		dispatched_before = true;
+	} else {
+		result = curl_easy_perform(curl);
+	}
+	execute_errno = errno;
+	return result;
+}
+
 uint16_t CURLHandle::GetResponseCode() {
 	long response_code = 0; // NOLINT(google-runtime-int): required by curl_easy_getinfo
 	auto result = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
@@ -252,6 +270,27 @@ private:
 			const bool verify_ssl = params.VerifyServerCertificate();
 			client.curl->SetOption(CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
 			client.curl->SetOption(CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
+			// Haybarn: "auto" attempts HTTP/2 over TLS via ALPN and falls back to HTTP/1.1 when the peer does not
+			// negotiate h2; plain http:// stays on 1.1 (CURL_HTTP_VERSION_2TLS does not attempt h2c). Servers that
+			// misbehave under h2 can be pinned with `SET http_version = '1.1'`.
+			client.curl->SetOption(CURLOPT_HTTP_VERSION, GetCurlHTTPVersion(params.http_version));
+			// Protocol-level details (TLS handshake, ALPN selection, HTTP/2 frames) on stderr when asked for.
+			client.curl->SetOption(CURLOPT_VERBOSE, params.curl_verbose ? 1L : 0L);
+			// Route through the curl_multi dispatcher so parallel transfers share one h2 connection per peer.
+			client.curl->SetUseMultiDispatch(params.http2_multiplex);
+		}
+
+		static long GetCurlHTTPVersion(const string &http_version) { // NOLINT(google-runtime-int): curl option value
+			if (http_version.empty() || http_version == "auto") {
+				return CURL_HTTP_VERSION_2TLS;
+			}
+			if (http_version == "1.1") {
+				return CURL_HTTP_VERSION_1_1;
+			}
+			if (http_version == "2.0" || http_version == "2") {
+				return CURL_HTTP_VERSION_2_0;
+			}
+			throw InvalidInputException("Unknown http_version '%s' (expected 'auto', '1.1', or '2.0')", http_version);
 		}
 
 		static void ConfigureTimeoutsAndCallbacks(HTTPFSCurlClient &client, const HTTPFSParams &params) {

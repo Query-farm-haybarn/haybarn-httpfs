@@ -170,6 +170,20 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::VARCHAR, "default", SetHTTPClientImplementation, SetScope::GLOBAL);
 	config.AddExtensionOption("httpfs_connection_caching", "Enable connection caching for HTTP requests",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true), SetHTTPConnectionCaching, SetScope::GLOBAL);
+	config.AddExtensionOption("http_version",
+	                          "HTTP version preference for the curl client: 'auto' (HTTP/2 via ALPN with HTTP/1.1 "
+	                          "fallback), '1.1' (force HTTP/1.1), or '2.0' (force HTTP/2, fail if peer rejects)",
+	                          LogicalType::VARCHAR, Value("auto"));
+	config.AddExtensionOption("httpfs_curl_verbose",
+	                          "Enable curl's CURLOPT_VERBOSE: protocol-level details (TLS handshake, ALPN selection, "
+	                          "HTTP/2 frame log) are printed to stderr. Useful for verifying HTTP/2 negotiation.",
+	                          LogicalType::BOOLEAN, Value(false));
+	config.AddExtensionOption("http2_multiplex",
+	                          "Route the curl client through a process-global curl_multi dispatcher so parallel range "
+	                          "reads share a single HTTP/2 connection via N streams instead of N separate connections. "
+	                          "Requires http_version='auto' or '2.0' and an H/2-capable peer to deliver any benefit; "
+	                          "falls back to a normal connection pool on H/1.1 peers. On by default.",
+	                          LogicalType::BOOLEAN, Value(true));
 }
 
 void HTTPSettings::Initialize(DatabaseInstance &db) {
