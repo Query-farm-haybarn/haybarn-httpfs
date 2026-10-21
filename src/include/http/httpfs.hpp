@@ -16,7 +16,8 @@
 
 namespace duckdb {
 
-enum class HTTPReadConditionType : uint8_t { NONE, ETAG, GCS_GENERATION_MATCH };
+//! LAST_MODIFIED (Haybarn): If-Unmodified-Since for files without a strong ETag
+enum class HTTPReadConditionType : uint8_t { NONE, ETAG, GCS_GENERATION_MATCH, LAST_MODIFIED };
 
 struct HTTPReadCondition {
 	HTTPReadConditionType type = HTTPReadConditionType::NONE;
