@@ -16,6 +16,8 @@ static string StripETagQuotes(const string &etag) {
 static void ApplyReadCondition(HTTPHeaders &headers, const HTTPReadConfig &read_config) {
 	if (read_config.condition.type == HTTPReadConditionType::ETAG) {
 		headers["If-Match"] = read_config.condition.value;
+	} else if (read_config.condition.type == HTTPReadConditionType::LAST_MODIFIED) {
+		headers["If-Unmodified-Since"] = read_config.condition.value;
 	}
 }
 
@@ -380,9 +382,13 @@ void HTTPFileSystem::ThrowIfReadConditionFailed(HTTPFileHandle &hfh, const HTTPR
 		return;
 	}
 	EraseGlobalCacheEntry(hfh.path);
-	auto kind = read_config.condition.type == HTTPReadConditionType::ETAG ? "ETag" : "Object version";
-	throw HTTPException(response, "%s on reading file \"%s\" changed after it was opened: the server rejected %s", kind,
-	                    hfh.path, read_config.condition.value);
+	auto kind = read_config.condition.type == HTTPReadConditionType::ETAG            ? "ETag"
+	            : read_config.condition.type == HTTPReadConditionType::LAST_MODIFIED ? "Last-Modified"
+	                                                                                 : "Object version";
+	throw HTTPException(response,
+	                    "%s on reading file \"%s\" changed after it was opened: the server rejected %s\nYou can "
+	                    "disable conditional reads via `SET unsafe_disable_etag_checks = true;`",
+	                    kind, hfh.path, read_config.condition.value);
 }
 
 unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string url, HTTPHeaders header_map,

@@ -58,3 +58,33 @@ is read as the bytes it was stored as, as before.
 The optional `httplib` client (`SET httpfs_client_implementation = 'httplib'`)
 sends `Accept-Encoding: identity` on every request; use the `curl` client for
 response compression.
+
+## Conditional reads (`If-Match` / `If-Unmodified-Since`)
+
+To detect a remote file being rewritten mid-read (e.g. between a parquet
+footer read and its row-group reads), reads of an open file carry an HTTP
+precondition:
+
+- **Strong ETag known** → `If-Match: <etag>` (RFC 9110 §13.1.1).
+- **Only a weak ETag or a Last-Modified known** → `If-Unmodified-Since: <date>`
+  (RFC 9110 §13.1.4). `If-Match` requires strong comparison, which a weak ETag
+  never satisfies, so the date-based precondition is used instead.
+
+A server that honors the precondition answers `412 Precondition Failed`, which
+surfaces as a "changed after it was opened" error instead of stale or mixed
+bytes; servers that ignore it answer as usual. S3 reads keep validating the
+response ETag (and GCS reads use `x-goog-if-generation-match`).
+`SET unsafe_disable_etag_checks = true;` sends no precondition.
+
+## HTTP/2
+
+The `curl` client negotiates HTTP/2 over TLS (ALPN) and falls back to
+HTTP/1.1 when the server does not offer it. Parallel reads from the same
+host are multiplexed as streams over one connection through a shared
+`curl_multi` dispatcher.
+
+| Setting               | Default | Meaning |
+|-----------------------|---------|---------|
+| `http_version`        | `auto`  | `auto` (HTTP/2 with HTTP/1.1 fallback), `1.1`, or `2.0` (fail if the peer refuses). |
+| `http2_multiplex`     | `true`  | Route transfers through the shared dispatcher so parallel reads share one HTTP/2 connection. |
+| `httpfs_curl_verbose` | `false` | Print curl's protocol log (TLS, ALPN, HTTP/2 frames) to stderr. |

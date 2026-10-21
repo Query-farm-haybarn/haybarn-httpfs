@@ -287,6 +287,13 @@ HTTPReadConfig HTTPFileHandle::BuildReadConfig() const {
 		result.condition.type = HTTPReadConditionType::ETAG;
 		result.condition.value = result.etag;
 		StringUtil::Trim(result.condition.value);
+	} else if (result.validate_etag && last_modified.value > 0) {
+		// Haybarn: If-Match needs strong comparison (RFC 9110 §13.1.1), which a weak ETag never satisfies, so files
+		// with only a weak ETag or a Last-Modified use the date-based precondition (RFC 9110 §13.1.4). Servers that
+		// ignore it answer as usual; the ones that honor it turn a mid-read rewrite into 412 Precondition Failed.
+		// HTTP-date is always GMT; timestamp_t is UTC.
+		result.condition.type = HTTPReadConditionType::LAST_MODIFIED;
+		result.condition.value = StrfTimeFormat::Format(last_modified, "%a, %d %b %Y %H:%M:%S GMT");
 	}
 	return result;
 }
