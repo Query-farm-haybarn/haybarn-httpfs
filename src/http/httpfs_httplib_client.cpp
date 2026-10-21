@@ -254,11 +254,18 @@ private:
 	static duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
 		duckdb_httplib_openssl::Headers headers;
 		for (auto &entry : header_map) {
-			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
+			if (!StringUtil::CIEquals(entry.first, "Accept-Encoding")) {
+				headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
+			}
 		}
 		for (auto &entry : params.extra_headers) {
-			headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
+			if (!StringUtil::CIEquals(entry.first, "Accept-Encoding")) {
+				headers.emplace(entry.first, HTTPFSHeaderValue::IsEmpty(entry.second) ? string() : entry.second);
+			}
 		}
+		// Haybarn: the bundled httplib does not reliably decode brotli/zstd, so this client asks for identity on every
+		// request (set_decompress(false) keeps any stored encoding untouched). Response compression needs curl.
+		headers.emplace("Accept-Encoding", "identity");
 		// every request is sent right after its headers: a failed one then reads only its own errno
 		errno = 0;
 		return headers;
