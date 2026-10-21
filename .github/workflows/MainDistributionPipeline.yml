@@ -1,9 +1,15 @@
 #
-# This workflow calls the main distribution pipeline from DuckDB to build, test and (optionally) release the extension
+# Haybarn build-fork: calls the HAYBARN-FORK distribution pipeline
+# (Query-farm-haybarn/haybarn-extension-ci-tools, haybarn-2.0 branch) so the build
+# runs in haybarn-ci images with Haybarn's R2-backed ccache, links the Haybarn
+# engine (override_duckdb_repository), and deploys to Haybarn R2 with the Haybarn
+# signing key and CalVer. duckdb_version is the Haybarn engine release tag; ci_phase
+# maps it to the embedded v2.0.0 version. The engine's haybarn-extensions.yml is the
+# canonical builder, so push is disabled here; a dispatch on haybarn-2.0 deploys.
 #
 name: Main Extension Distribution Pipeline
 on:
-  push:
+  # push:  # Haybarn: disabled — built via core engine haybarn-extensions.yml SHA pin
   pull_request:
   workflow_dispatch:
 
@@ -12,49 +18,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare:
-    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-slim' || 'ubuntu-slim' }}
-    name: Prepare
-    outputs:
-      runners: ${{ steps.runners.outputs.runners }}
-    steps:
-      - name: Detect runners
-        id: runners
-        uses: duckdb/duckdb-ci/detect-runners@main
-
-  build:
-    name: Build extension
-    uses: duckdb/extension-ci-tools/.github/workflows/build.yml@main
-    needs:
-      - prepare
+  duckdb-stable-build:
+    name: Build extension binaries
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
+    secrets:
+      vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
-      groups: |
-        main:
-          config: extension_config.cmake
-          toolchain: main
-      opt_in_archs: windows_arm64
-      runners: ${{ needs.prepare.outputs.runners }}
+      extension_name: &ext_name httpfs
+      duckdb_version: &duckdb_ref haybarn-v2.0.0-rc1
+      ci_tools_version: &ci_tools_ref 5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
+      override_duckdb_repository: 'https://github.com/Query-farm-haybarn/haybarn'
+      override_ci_tools_repository: &ci_tools_repo 'Query-farm-haybarn/haybarn-extension-ci-tools'
 
-  deploy:
-    name: Deploy extension
-    if: ${{ startsWith(github.ref_name, 'v') || github.ref_name == 'main' }}
-    needs:
-      - build
-    uses: duckdb/extension-ci-tools/.github/workflows/deploy.yml@main
+  duckdb-stable-deploy:
+    name: Deploy extension binaries
+    needs: duckdb-stable-build
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
     secrets: inherit
     with:
-      duckdb_version: ${{ needs.build.outputs.duckdb_version }}
-      duckdb_commit: ${{ needs.build.outputs.duckdb_commit }}
-      deploy_extensions: httpfs
-      deploy_latest: ${{ startsWith(github.ref, 'refs/heads/v') }}
-      deploy_versioned: ${{ startsWith(github.ref, 'refs/heads/v') || github.ref == 'refs/heads/main' }}
+      extension_name: *ext_name
+      duckdb_version: *duckdb_ref
+      ci_tools_version: *ci_tools_ref
+      override_ci_tools_repository: *ci_tools_repo
+      deploy_latest: ${{ github.ref == 'refs/heads/haybarn-2.0' }}
+      deploy_versioned: ${{ github.ref == 'refs/heads/haybarn-2.0' }}
 
   code-quality:
     name: Code Quality
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@main
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
     with:
-      extension_name: httpfs
-      ci_tools_version: main
+      extension_name: *ext_name
+      duckdb_version: *duckdb_ref
+      ci_tools_version: *ci_tools_ref
+      override_ci_tools_repository: *ci_tools_repo
       extra_toolchains: 'python3'
       format_checks: 'format'
 
@@ -82,7 +78,7 @@ jobs:
 
   relassert:
     name: Build relassert
-    runs-on: ${{ github.repository_owner == 'duckdb' && 'namespace-profile-linux-x64' || 'ubuntu-latest' }}
+    runs-on: ${{ 'ubuntu-latest' }}
     env:
       GEN: ninja
       CC: clang-20
@@ -116,7 +112,7 @@ jobs:
           max-size: 5GB
           evict-old-files: job
       - name: Build (relassert → ASan + UBSan + LSan)
-        uses: duckdb/duckdb-ci/build-duckdb@main
+        uses: Query-farm-haybarn/haybarn-ci/build-duckdb@e0ad82dd40f1218f92e99adade6810c4c97b3279 # haybarn
         with:
           build-type: relassert
           build: python3 duckdb/scripts/ci/retry.py -- make relassert
