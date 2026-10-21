@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/string_util.hpp"
 
@@ -588,6 +589,27 @@ public:
 		for (const auto &header : config.metadata.response_headers) {
 			response.set_header(header.first, header.second);
 		}
+	}
+
+	//! Haybarn: the first configured variant whose coding the request's Accept-Encoding lists (q=0 excluded)
+	optional_ptr<const MockS3EncodedVariant> FindEncodedVariant(const httplib::Request &request) const {
+		auto accept_encoding = request.get_header_value("Accept-Encoding");
+		for (auto &variant : config.full_get.encoded_variants) {
+			for (auto token : StringUtil::Split(accept_encoding, ',')) {
+				auto parameters = token.find(';');
+				auto coding = token.substr(0, parameters);
+				StringUtil::Trim(coding);
+				if (!StringUtil::CIEquals(coding, variant.coding)) {
+					continue;
+				}
+				if (parameters != string::npos && StringUtil::Contains(token.substr(parameters), "q=0") &&
+				    !StringUtil::Contains(token.substr(parameters), "q=0.")) {
+					continue;
+				}
+				return &variant;
+			}
+		}
+		return nullptr;
 	}
 
 	string GetResponseETag() const {
@@ -1200,6 +1222,16 @@ public:
 			if (range.empty()) {
 				response.status = 200;
 				SetGetHeaders(response, generation);
+				if (auto variant = FindEncodedVariant(request)) {
+					if (!variant->etag.empty()) {
+						response.headers.erase("ETag");
+						response.set_header("ETag", variant->etag);
+					}
+					response.set_header("Content-Encoding", variant->coding);
+					response.set_content(variant->body, "application/octet-stream");
+					Record(request, response.status);
+					return;
+				}
 				if (config.full_get.block_until_released) {
 					response.set_content_provider(
 					    data.size(), "application/octet-stream",

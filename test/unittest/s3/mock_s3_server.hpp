@@ -168,11 +168,23 @@ struct MockS3RangeConfig {
 	string release;
 };
 
+//! Haybarn: a content-coded variant of the object, as a compressing web server would send it
+struct MockS3EncodedVariant {
+	//! Content-coding token (gzip, deflate, br, zstd)
+	string coding;
+	//! The coded bytes
+	string body;
+	//! ETag of the variant; empty keeps the GET ETag
+	string etag;
+};
+
 struct MockS3FullGetConfig {
 	//! Send successful responses with chunked transfer encoding and no Content-Length
 	bool chunked = false;
 	//! Hold the response body until ReleaseFullGet is called
 	bool block_until_released = false;
+	//! Haybarn: variants served to full GETs whose Accept-Encoding lists their coding, in this order of preference
+	vector<MockS3EncodedVariant> encoded_variants;
 };
 
 struct MockS3PutResponseConfig {
