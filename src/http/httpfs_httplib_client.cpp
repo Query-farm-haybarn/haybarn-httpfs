@@ -30,6 +30,10 @@ private:
 		}
 
 		bool HandleContent(const char *data, size_t data_length) {
+			// Haybarn: stop the download once cancellation is requested; httplib then reports Error::Canceled
+			if (CancellationRequested(request)) {
+				return false;
+			}
 			RecordFirstByte();
 			auto chunk_size = NumericCast<idx_t>(data_length);
 			total_bytes += chunk_size;
@@ -160,14 +164,14 @@ public:
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
 		if (!info.response_handler && !info.content_handler) {
-			return TransformBufferedResult(client->Get(info.path, headers));
+			return ApplyCancellation(TransformBufferedResult(client->Get(info.path, headers)), info, "GET");
 		}
 		GetTransferState transfer(*this, info);
 		auto result = client->Get(
 		    info.path.c_str(), headers,
 		    [&](const duckdb_httplib_openssl::Response &response) { return transfer.HandleResponse(response); },
 		    [&](const char *data, size_t data_length) { return transfer.HandleContent(data, data_length); });
-		return transfer.Finish(std::move(result));
+		return ApplyCancellation(transfer.Finish(std::move(result)), info, "GET");
 	}
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
@@ -187,8 +191,9 @@ public:
 		};
 		// The provider overload appends Content-Type even when it is already in headers.
 		auto content_type = info.headers.HasHeader("Content-Type") ? string() : info.content_type;
-		return TransformBufferedResult(
-		    client->Put(info.path, headers, body_size, std::move(content_provider), content_type));
+		return ApplyCancellation(TransformBufferedResult(client->Put(info.path, headers, body_size,
+		                                                             std::move(content_provider), content_type)),
+		                         info, "PUT");
 	}
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
@@ -197,7 +202,7 @@ public:
 			state->RecordRequest(RequestType::HEAD_REQUEST);
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformBufferedResult(client->Head(info.path, headers));
+		return ApplyCancellation(TransformBufferedResult(client->Head(info.path, headers)), info, "HEAD");
 	}
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
@@ -206,7 +211,7 @@ public:
 			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
 		auto headers = TransformHeaders(info.headers, info.params);
-		return TransformBufferedResult(client->Delete(info.path, headers));
+		return ApplyCancellation(TransformBufferedResult(client->Delete(info.path, headers)), info, "DELETE");
 	}
 
 	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
@@ -237,12 +242,20 @@ public:
 		}
 		req.content_receiver = [&](const char *data, size_t data_length, uint64_t /*offset*/,
 		                           uint64_t /*total_length*/) {
+			// Haybarn: only fires while response bytes arrive (httplib has no upload-phase hook), so this is weaker
+			// than the curl client's progress callback
+			if (CancellationRequested(info)) {
+				return false;
+			}
 			info.buffer_out += string(data, data_length);
 			return true;
 		};
 		// First assign body, this is the body that will be uploaded
 		req.body.assign(const_char_ptr_cast(info.buffer_in), info.buffer_in_len);
 		auto transformed_req = TransformResult(client->send(req));
+		if (transformed_req->HasRequestError() && CancellationRequested(info)) {
+			return ApplyCancellation(std::move(transformed_req), info, "POST");
+		}
 		transformed_req->body = info.buffer_out;
 		if (state) {
 			state->RecordBytesReceived(info.buffer_out.size());
@@ -251,6 +264,22 @@ public:
 	}
 
 private:
+	static bool CancellationRequested(const BaseRequest &info) {
+		return HTTPFSUtil::CancellationRequested(info);
+	}
+
+	// Haybarn: a request that did not complete (it carries a request error) while cancellation was requested is
+	// reported as cancelled, so it is terminal rather than retried. httplib can only interrupt transfers through the
+	// Get/Post content receivers; a request that ran to completion is returned as the success it was.
+	static unique_ptr<HTTPResponse> ApplyCancellation(unique_ptr<HTTPResponse> response, const BaseRequest &info,
+	                                                  const char *method) {
+		if (response && response->HasRequestError() && CancellationRequested(info)) {
+			response->cancelled = true;
+			response->request_error = "HTTP " + string(method) + " request was cancelled";
+		}
+		return response;
+	}
+
 	static duckdb_httplib_openssl::Headers TransformHeaders(const HTTPHeaders &header_map, const HTTPParams &params) {
 		duckdb_httplib_openssl::Headers headers;
 		for (auto &entry : header_map) {
