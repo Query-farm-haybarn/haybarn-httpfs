@@ -5,6 +5,11 @@ require parquet
 
 require httpfs
 
+# Haybarn: keep the HEAD + range GET pattern this test checks; a small text/plain file is otherwise read with one
+# compressed full GET (http_compressed_download_threshold)
+statement ok
+SET http_compressed_download_threshold = 0;
+
 statement ok
 CALL enable_logging('HTTP');
 

@@ -75,6 +75,10 @@ protected:
 	HTTPObjectVersion ReadObjectVersion(const HTTPHeaders &headers) const override;
 	void InitializeFromCacheEntry(const HTTPMetadataCacheEntry &cache_entry) override;
 	HTTPMetadataCacheEntry GetCacheEntry() const override;
+	//! Haybarn: S3 and GCS serve objects as stored; they never negotiate response compression
+	bool CanNegotiateCompression() const override {
+		return false;
+	}
 
 private:
 	void SetRegion(const string &region);

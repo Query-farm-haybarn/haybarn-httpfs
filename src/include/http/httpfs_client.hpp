@@ -63,6 +63,7 @@ public:
 	static constexpr uint64_t DEFAULT_HF_MAX_PER_PAGE = 0;
 	static constexpr bool DEFAULT_FORCE_DOWNLOAD = false;
 	static constexpr bool AUTO_FALLBACK_TO_FULL_DOWNLOAD = true;
+	static constexpr idx_t DEFAULT_COMPRESSED_DOWNLOAD_THRESHOLD = 16ULL * 1024 * 1024;
 
 	//! Runtime parameters owned by HTTPFS; browser clients consume only the HTTPParams base.
 	bool force_download = DEFAULT_FORCE_DOWNLOAD;
@@ -92,6 +93,12 @@ public:
 	//! requests. Weak, so a handle that outlives the opening connection never touches a destroyed context; empty for
 	//! database-level openers.
 	weak_ptr<ClientContext> interrupt_context;
+	//! Haybarn: files up to this many bytes whose HEAD reports a text-like Content-Type (and no Content-Encoding) are
+	//! read with one full GET that negotiates response compression, instead of range requests. 0 disables.
+	idx_t compressed_download_threshold = DEFAULT_COMPRESSED_DOWNLOAD_THRESHOLD;
+	//! Haybarn: per request; a non-range GET of a whole plain HTTP(S) file may negotiate response compression (curl
+	//! decodes). Everything else asks for identity and is never decoded.
+	bool negotiate_compression = false;
 
 private:
 	friend class HTTPFSUtil;

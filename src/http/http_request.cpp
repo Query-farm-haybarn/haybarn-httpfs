@@ -13,6 +13,23 @@ static string StripETagQuotes(const string &etag) {
 	return etag;
 }
 
+// Haybarn: weak comparison (RFC 9110 §8.8.3.2) ignores the W/ flag: two ETags match when their opaque-tags do.
+// Servers label a content-coded variant weak (GitHub, nginx and Cloudflare answer a gzip GET with W/"x" for an
+// identity "x"), so a compressed full download compared against an identity HEAD needs it.
+static string StripWeakETag(const string &etag) {
+	if (etag.size() >= 2 && (etag[0] == 'W' || etag[0] == 'w') && etag[1] == '/') {
+		return etag.substr(2);
+	}
+	return etag;
+}
+
+static bool ETagsMatch(const string &a, const string &b, bool weak) {
+	if (weak) {
+		return StripETagQuotes(StripWeakETag(a)) == StripETagQuotes(StripWeakETag(b));
+	}
+	return a == b || StripETagQuotes(a) == StripETagQuotes(b);
+}
+
 static void ApplyReadCondition(HTTPHeaders &headers, const HTTPReadConfig &read_config) {
 	if (read_config.condition.type == HTTPReadConditionType::ETAG) {
 		headers["If-Match"] = read_config.condition.value;
@@ -340,7 +357,7 @@ void HTTPFileSystem::ValidateResponseVersion(HTTPFileHandle &hfh, const HTTPRead
 		return;
 	}
 	auto response_etag = response.GetHeaderValue("ETag");
-	if (response_etag.empty() || StripETagQuotes(response_etag) == StripETagQuotes(read_config.etag)) {
+	if (response_etag.empty() || ETagsMatch(response_etag, read_config.etag, read_config.weak_etag_comparison)) {
 		return;
 	}
 	EraseGlobalCacheEntry(hfh.path);
@@ -365,9 +382,9 @@ void HTTPFileSystem::ValidateCachedFile(HTTPFileHandle &hfh, const HTTPReadConfi
 		version_matches = actual.GetType() == HTTPObjectVersionType::GCS_GENERATION &&
 		                  actual.GetValue() == read_config.condition.value;
 	}
+	// Haybarn: weak comparison, as the cached download may be a content-coded variant of the probed representation
 	const auto etag_matches = !read_config.validate_etag || read_config.etag.empty() || metadata.etag.empty() ||
-	                          metadata.etag == read_config.etag ||
-	                          StripETagQuotes(metadata.etag) == StripETagQuotes(read_config.etag);
+	                          ETagsMatch(metadata.etag, read_config.etag, true);
 	if (!version_matches || !etag_matches) {
 		EraseGlobalCacheEntry(hfh.path);
 		throw HTTPException(Exception::ConstructMessage(
@@ -396,8 +413,18 @@ unique_ptr<HTTPResponse> HTTPFileSystem::GetRequest(FileHandle &handle, string u
 	auto &hfh = handle.Cast<HTTPFileHandle>();
 	auto captured = hfh.request_session->Capture();
 	auto session_request = captured.snapshot->CreateRequest(std::move(header_map));
+	// Haybarn: a whole-file GET may negotiate response compression, unless it carries a strong-ETag precondition. That
+	// is the fallback for a server that ignores ranges in the middle of a range-read lifecycle: If-Match pins the bytes
+	// to the version already being read, and a coded variant (a different representation) could never satisfy it.
+	// Up-front whole-file reads carry no ETag precondition. The coded variant's ETag is compared weakly; the
+	// If-Unmodified-Since precondition is representation-independent and stays.
+	auto effective_config = read_config;
+	if (hfh.CanNegotiateCompression() && read_config.condition.type != HTTPReadConditionType::ETAG) {
+		session_request.params->negotiate_compression = true;
+		effective_config.weak_etag_comparison = true;
+	}
 	return RunGetRequest(
-	    hfh, url, session_request.headers, *session_request.params, read_config, download,
+	    hfh, url, session_request.headers, *session_request.params, effective_config, download,
 	    [&](const HTTPResponse &response) { return GetHTTPError(handle, response, RequestType::GET_REQUEST, url); },
 	    [&](BaseRequest &request) { return hfh.request_session->Request(request); });
 }
