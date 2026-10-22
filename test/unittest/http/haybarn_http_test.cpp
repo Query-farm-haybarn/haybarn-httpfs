@@ -185,6 +185,56 @@ TEST_CASE("Interrupting a query cancels its in-flight HTTP GET", "[httpfs][hayba
 	}
 }
 
+TEST_CASE("Interrupting a query ends its HTTP retry back-off", "[httpfs][haybarn][cancellation]") {
+	// The engine's retry loop sleeps the back-off in slices and ends it once the opening client context is
+	// interrupted, whichever client sends the requests.
+	for (const auto &client : {"curl", "httplib"}) {
+		CAPTURE(client);
+		MockS3ServerConfig config;
+		config.object.data = HTTPTestHelper::CreateObjectData(4096);
+		// every GET is a retryable RequestTimeout
+		config.failures.transient_get_failures = 100;
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		HTTPTestHelper::Configure(db, con, 10, client);
+		HTTPTestHelper::RequireQueryOk(con, "SET force_download = true");
+		// back-offs of up to 20 s, which an interrupted query used to sit out
+		HTTPTestHelper::RequireQueryOk(con, "SET http_retry_wait_ms = 20000");
+
+		unique_ptr<QueryResult> result;
+		std::thread query(
+		    [&]() { result = con.Query("SELECT octet_length(content) FROM read_blob('" + server.HTTPPath() + "')"); });
+		auto failed_gets = [&]() {
+			idx_t count = 0;
+			for (auto &observation : server.Observations()) {
+				count += observation.method == "GET" && observation.status == 400;
+			}
+			return count;
+		};
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while (failed_gets() == 0 && std::chrono::steady_clock::now() < deadline) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		const auto interrupted = std::chrono::steady_clock::now();
+		con.Interrupt();
+		query.join();
+		const auto elapsed =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - interrupted)
+		        .count();
+
+		REQUIRE(failed_gets() >= 1);
+		REQUIRE(result);
+		INFO((result->HasError() ? result->GetError() : string("no error")));
+		REQUIRE(result->HasError());
+		REQUIRE(result->GetErrorType() == ExceptionType::INTERRUPT);
+		REQUIRE(elapsed < 3000);
+		// the interrupted back-off is never followed by another attempt
+		REQUIRE(failed_gets() <= 2);
+	}
+}
+
 TEST_CASE("HTTP version setting rejects unknown values", "[httpfs][haybarn][http2]") {
 	MockS3ServerConfig config;
 	MockS3Server server(std::move(config));
