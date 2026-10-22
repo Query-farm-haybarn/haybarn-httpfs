@@ -115,9 +115,6 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "http_compressed_download_threshold",
 		                                 result->compressed_download_threshold, info);
 		auto context = FileOpener::TryGetClientContext(opener);
-		if (context) {
-			result->interrupt_context = context->shared_from_this();
-		}
 		Value external_cache_enabled;
 		if (context &&
 		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&
@@ -226,18 +223,6 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
 unique_ptr<HTTPFSParams> HTTPFSUtil::InitializeRawParameters(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,
                                                              optional_ptr<FileOpenerInfo> info) {
 	return HTTPParametersInitializer::Create(http_util, opener, info);
-}
-
-bool HTTPFSUtil::CancellationArmed(const BaseRequest &request) {
-	return request.cancellation || !request.params.Cast<HTTPFSParams>().interrupt_context.expired();
-}
-
-bool HTTPFSUtil::CancellationRequested(const BaseRequest &request) {
-	if (request.cancellation && request.cancellation->load(std::memory_order_relaxed)) {
-		return true;
-	}
-	auto context = request.params.Cast<HTTPFSParams>().interrupt_context.lock();
-	return context && context->IsInterrupted();
 }
 
 unique_ptr<HTTPParams> HTTPFSParams::Clone() const {

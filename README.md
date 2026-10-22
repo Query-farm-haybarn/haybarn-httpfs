@@ -119,4 +119,7 @@ requests instead of waiting for them to finish or time out. The `curl`
 client checks for cancellation throughout every transfer (connect, upload,
 waiting for the response, download) for all methods; the `httplib` client
 can only stop while response bytes arrive. A cancelled request is never
-retried.
+retried, and an interrupt also ends a retry back-off at once. The interrupt is
+reached through the Haybarn engine (`HTTPParams::interrupt_context`,
+`HTTPUtil::CancellationRequested`), so every HTTP client sees the same
+cancellation.

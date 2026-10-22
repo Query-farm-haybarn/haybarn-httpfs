@@ -76,7 +76,7 @@ static size_t RequestHeaderCallback(void *contents, size_t size, size_t nmemb, v
 // bodyless requests and a POST still waiting for its response too. clientp is the request's BaseRequest.
 static int CancelTransferCallback(void *clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
 	auto request = static_cast<const BaseRequest *>(clientp);
-	return request && HTTPFSUtil::CancellationRequested(*request) ? 1 : 0;
+	return request && HTTPUtil::CancellationRequested(*request) ? 1 : 0;
 }
 
 // How long a shared DNS entry may be reused. Object stores such as S3 answer with a rotating set of
@@ -907,7 +907,7 @@ private:
 	}
 
 	void ArmCancellation(const BaseRequest &info) {
-		if (!HTTPFSUtil::CancellationArmed(info)) {
+		if (!HTTPUtil::CancellationArmed(info)) {
 			return;
 		}
 		curl->SetOption(CURLOPT_XFERINFOFUNCTION, CancelTransferCallback);
@@ -925,7 +925,7 @@ private:
 	// tells a cancellation from the dispatcher's shutdown abort. The cancelled response is terminal (ShouldRetry() is
 	// false). Returns nullptr when the request was not cancelled.
 	unique_ptr<HTTPResponse> CheckCancelled(CURLcode res, const BaseRequest &info, const char *method) {
-		if (res != CURLE_ABORTED_BY_CALLBACK || !HTTPFSUtil::CancellationRequested(info)) {
+		if (res != CURLE_ABORTED_BY_CALLBACK || !HTTPUtil::CancellationRequested(info)) {
 			return nullptr;
 		}
 		auto response = make_uniq<HTTPResponse>(HTTPStatusCode::INVALID);
