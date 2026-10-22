@@ -100,18 +100,29 @@ private:
 		{
 			// Set the rejecting flag and the stopping flag together under
 			// queue_mu so any concurrent Submit either sees rejecting=true
-			// and bails, OR has already pushed (and will be drained below).
+			// and bails, OR has already pushed (and will be drained by the
+			// loop's shutdown path).
 			std::lock_guard<std::mutex> lk(queue_mu);
 			rejecting = true;
 			stopping.store(true);
 		}
 		curl_multi_wakeup(multi);
-		if (thread.joinable()) {
-			thread.join();
+		// This runs at static-destruction time, i.e. during process exit.
+		// Never join here: on Windows a thread's exit needs the loader lock,
+		// which process teardown (and DLL detach) holds, so join() can block
+		// forever. Wait a bounded time for the loop to drain instead (bounded
+		// because the OS may already have terminated the thread), then detach.
+		{
+			std::unique_lock<std::mutex> lk(exit_mu);
+			exit_cv.wait_for(lk, std::chrono::seconds(1), [&] { return loop_exited; });
 		}
-		// Thread joined → no one else touches `multi`. Safe to clean up.
-		curl_multi_cleanup(multi);
-		multi = nullptr;
+		if (thread.joinable()) {
+			thread.detach();
+		}
+		// The multi handle is deliberately leaked: curl_multi_cleanup would
+		// shut down live TLS connections after the TLS library may already
+		// have run its own exit-time cleanup, and the process is going away.
+		// A loop that did not drain may still be using it.
 	}
 
 	void Loop() {
@@ -134,6 +145,11 @@ private:
 		// original implementation only drained the queue, leaving in-flight
 		// workers stuck on their condvars forever at process exit.
 		FailAllPending(CURLE_ABORTED_BY_CALLBACK);
+		// Last touch of *this: the destructor may return (and the object be
+		// destroyed) as soon as it observes loop_exited.
+		std::lock_guard<std::mutex> lk(exit_mu);
+		loop_exited = true;
+		exit_cv.notify_one();
 	}
 
 	void LoopOnce() {
@@ -228,6 +244,11 @@ private:
 	// multi at shutdown leave their workers stuck on a cv that nothing
 	// will signal.
 	std::vector<PendingTransfer *> in_flight;
+	// Set by the dispatcher thread when Loop() has drained and returned;
+	// the destructor waits on it (bounded) instead of joining.
+	std::mutex exit_mu;
+	std::condition_variable exit_cv;
+	bool loop_exited = false;
 };
 
 } // namespace
