@@ -89,10 +89,6 @@ public:
 	//! for curl_easy_perform, so HTTP/2 stream multiplexing across worker threads needs curl_multi: N parallel range
 	//! reads then share one TCP+TLS connection per peer. HTTP/1.1 peers get an ordinary connection pool.
 	bool http2_multiplex = true;
-	//! Haybarn: the client context that opened the file, whose query interruption cancels the file's in-flight
-	//! requests. Weak, so a handle that outlives the opening connection never touches a destroyed context; empty for
-	//! database-level openers.
-	weak_ptr<ClientContext> interrupt_context;
 	//! Haybarn: files up to this many bytes whose HEAD reports a text-like Content-Type (and no Content-Encoding) are
 	//! read with one full GET that negotiates response compression, instead of range requests. 0 disables.
 	idx_t compressed_download_threshold = DEFAULT_COMPRESSED_DOWNLOAD_THRESHOLD;
@@ -129,12 +125,6 @@ public:
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
-	//! Haybarn: whether a request should be abandoned: its caller-owned cancellation flag is set, or the query of the
-	//! client context that opened the file was interrupted. Called from transfer callbacks, possibly on the curl
-	//! dispatcher thread.
-	static bool CancellationRequested(const BaseRequest &request);
-	//! Haybarn: whether any cancellation source is attached to the request.
-	static bool CancellationArmed(const BaseRequest &request);
 	static const char *GetRequestMethod(RequestType request_type);
 	static HTTPException GetHTTPStatusError(const HTTPResponse &response, RequestType request_type,
 	                                        const string &operation, const string &display_url,

@@ -265,7 +265,7 @@ public:
 
 private:
 	static bool CancellationRequested(const BaseRequest &info) {
-		return HTTPFSUtil::CancellationRequested(info);
+		return HTTPUtil::CancellationRequested(info);
 	}
 
 	// Haybarn: a request that did not complete (it carries a request error) while cancellation was requested is
