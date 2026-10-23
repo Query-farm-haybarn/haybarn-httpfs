@@ -5,13 +5,21 @@
 # engine (override_duckdb_repository), and deploys to Haybarn R2 with the Haybarn
 # signing key and CalVer. duckdb_version is the Haybarn engine release tag; ci_phase
 # maps it to the embedded v2.0.0 version. The engine's haybarn-extensions.yml is the
-# canonical builder, so push is disabled here; a dispatch on haybarn-2.0 deploys.
+# canonical builder, so push is disabled here. Deploy runs only on a manual dispatch
+# with deploy=true; PRs and plain dispatches build and test without publishing.
+# ci-tools is pinned to the SHA the engine's haybarn-extensions-publish.yml uses.
+# 2.0 platforms: no wasm_mvp, osx_amd64 or windows_arm64.
 #
 name: Main Extension Distribution Pipeline
 on:
   # push:  # Haybarn: disabled — built via core engine haybarn-extensions.yml SHA pin
   pull_request:
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Publish to Haybarn R2 (haybarn-2.0 only)'
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
@@ -20,32 +28,35 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_distribution.yml@32194a08d43670f1496a40c4793e05e337405424
     secrets:
       vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
       extension_name: &ext_name httpfs
-      duckdb_version: &duckdb_ref haybarn-v2.0.0-rc1
-      ci_tools_version: &ci_tools_ref 5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
+      duckdb_version: &duckdb_ref haybarn-v2.0.0-rc5
+      ci_tools_version: &ci_tools_ref 32194a08d43670f1496a40c4793e05e337405424
       override_duckdb_repository: 'https://github.com/Query-farm-haybarn/haybarn'
       override_ci_tools_repository: &ci_tools_repo 'Query-farm-haybarn/haybarn-extension-ci-tools'
+      exclude_archs: &exclude_archs 'wasm_mvp;osx_amd64;windows_arm64'
 
   duckdb-stable-deploy:
     name: Deploy extension binaries
     needs: duckdb-stable-build
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy && github.ref == 'refs/heads/haybarn-2.0' }}
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_deploy.yml@32194a08d43670f1496a40c4793e05e337405424
     secrets: inherit
     with:
       extension_name: *ext_name
       duckdb_version: *duckdb_ref
       ci_tools_version: *ci_tools_ref
       override_ci_tools_repository: *ci_tools_repo
+      exclude_archs: *exclude_archs
       deploy_latest: ${{ github.ref == 'refs/heads/haybarn-2.0' }}
       deploy_versioned: ${{ github.ref == 'refs/heads/haybarn-2.0' }}
 
   code-quality:
     name: Code Quality
-    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@5fde928546a7c1c4c3fe9f7756b185ae87f27a7f
+    uses: Query-farm-haybarn/haybarn-extension-ci-tools/.github/workflows/_extension_code_quality.yml@32194a08d43670f1496a40c4793e05e337405424
     with:
       extension_name: *ext_name
       duckdb_version: *duckdb_ref
