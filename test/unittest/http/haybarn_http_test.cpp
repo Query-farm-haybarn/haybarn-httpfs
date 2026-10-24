@@ -256,4 +256,37 @@ TEST_CASE("HTTP version setting rejects unknown values", "[httpfs][haybarn][http
 	REQUIRE(StringUtil::Contains(result->GetError(), "Unknown http_version"));
 }
 
+TEST_CASE("HTTP responses with header lines over 8 KiB are read", "[httpfs][haybarn][headers]") {
+	// GitHub's release-asset redirect sends one content-security-policy line of 9,243 bytes
+	const string large_value(9300, 'a');
+	for (const auto &client : {"curl", "httplib"}) {
+		CAPTURE(client);
+		MockS3ServerConfig config;
+		config.object.data = HTTPTestHelper::CreateObjectData(4096);
+		config.metadata.redirect_head = true;
+		config.metadata.redirect_response_headers = {{"Content-Security-Policy", large_value}};
+		config.metadata.response_headers = {{"X-Haybarn-Large", large_value}};
+		config.metadata.get_response_headers = {{"X-Haybarn-Large", large_value}};
+		MockS3Server server(std::move(config));
+
+		DuckDB db(nullptr);
+		Connection con(db);
+		HTTPTestHelper::Configure(db, con, 0, client);
+
+		auto &http_util = HTTPUtil::Get(*db.instance);
+		auto params = http_util.InitializeParameters(*db.instance, server.HTTPPath());
+		HeadRequestInfo head(server.HTTPPath(), HTTPHeaders(), *params);
+		auto response = http_util.Request(head);
+		REQUIRE(response);
+		INFO(response->GetError());
+		REQUIRE(response->status == HTTPStatusCode::OK_200);
+		REQUIRE(response->GetHeaderValue("X-Haybarn-Large") == large_value);
+
+		HTTPTestHelper::RequireQueryOk(con, "BEGIN TRANSACTION");
+		auto data = HTTPTestHelper::ReadRange(con, server.HTTPPath(), 100, 64);
+		HTTPTestHelper::RequireQueryOk(con, "COMMIT");
+		REQUIRE(data == server.ObjectData().substr(100, 64));
+	}
+}
+
 } // namespace duckdb
