@@ -15,6 +15,11 @@ endif()
 
 if(NOT EMSCRIPTEN)
   add_definitions(-DOVERRIDE_ENCRYPTION_UTILS=1)
+  # Haybarn: GitHub's release-asset redirects send a 9,243-byte
+  # content-security-policy line; cpp-httplib's 8 KiB default rejects it. The
+  # engine's httplib.hpp defaults to 16 KiB from rc6; set it here so httpfs and
+  # its unit tests get it against older engine headers too.
+  add_definitions(-DCPPHTTPLIB_HEADER_MAX_LENGTH=16384)
 else()
   set(DUCKDB_EXTENSION_HTTPFS_LINKED_LIBS
       "../../third_party/mbedtls/libduckdb_mbedtls.a")
