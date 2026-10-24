@@ -33,7 +33,7 @@ jobs:
       vcpkg_token: ${{ secrets.HAYBARN_VCPKG_TOKEN }}
     with:
       extension_name: &ext_name httpfs
-      duckdb_version: &duckdb_ref haybarn-v2.0.0-rc5
+      duckdb_version: &duckdb_ref haybarn-v2.0.0-rc6
       ci_tools_version: &ci_tools_ref 93efd132ded18564358b46da67818a3b904e6850
       override_duckdb_repository: 'https://github.com/Query-farm-haybarn/haybarn'
       override_ci_tools_repository: &ci_tools_repo 'Query-farm-haybarn/haybarn-extension-ci-tools'
