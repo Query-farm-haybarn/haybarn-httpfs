@@ -85,12 +85,8 @@ static int CancelTransferCallback(void *clientp, curl_off_t, curl_off_t, curl_of
 // burst of parallel requests still resolves a host only once at this bound.
 static constexpr long SHARED_DNS_CACHE_TIMEOUT_SECONDS = 5;
 
-// The share and its locks are deliberately never destroyed. The CURLSH below is never cleaned up, so
-// any easy handle that still uses it at process exit (a request on a thread the host did not join) calls
-// back into these locks after static destructors have run. A destroyed std::mutex makes lock() throw
-// "mutex lock failed: Invalid argument" on macOS, and that throw inside a destructor terminates the process.
 static std::mutex &GetCurlShareLock(curl_lock_data data) {
-	static auto *share_locks = new std::mutex[CURL_LOCK_DATA_LAST];
+	static std::mutex share_locks[CURL_LOCK_DATA_LAST];
 	return share_locks[data];
 }
 
@@ -236,10 +232,8 @@ struct CURLGlobalState {
 };
 
 static CURLGlobalState &GetCURLGlobalState() {
-	// Never destroyed, for the same reason as the curl share locks: a client may be built on a thread that
-	// outlives static destruction.
-	static auto *state = new CURLGlobalState();
-	return *state;
+	static CURLGlobalState state;
+	return state;
 }
 
 class HTTPFSCurlClient : public HTTPClient {
