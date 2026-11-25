@@ -50,6 +50,7 @@ static void wrapped(int i, void *p) {
 }
 
 // One trampoline per wrapped key (pthread destructors carry no context).
+// clang-format off
 #define W(i) static void w##i(void *p) { wrapped(i, p); }
 W(0) W(1) W(2) W(3) W(4) W(5) W(6) W(7)
 W(8) W(9) W(10) W(11) W(12) W(13) W(14) W(15)
@@ -69,6 +70,7 @@ static void (*const tramp[MAX_KEYS])(void *) = {
     w48, w49, w50, w51, w52, w53, w54, w55,
     w56, w57, w58, w59, w60, w61, w62, w63,
 };
+// clang-format on
 
 int pthread_key_create(pthread_key_t *key, void (*dtor)(void *)) {
 	static int (*real)(pthread_key_t *, void (*)(void *));
