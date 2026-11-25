@@ -1,0 +1,21 @@
+# name: test/sql/exit_teardown/http_dispatcher_exit.test
+# description: One httpfs request, so the curl multi dispatcher thread exists when the process exits
+# group: [exit_teardown]
+
+# Driven by test/exit_teardown/run_exit_teardown_check.sh, which runs this
+# file under an LD_PRELOAD probe that fails the process (status 97) if any
+# thread is still exiting when exit() finishes. httpfs routes every transfer
+# through a process-global curl_multi dispatcher thread (http2_multiplex
+# defaults to true), and that thread once outlived exit, racing
+# OPENSSL_cleanup ("double free or corruption" / SIGSEGV after every test
+# passed). The query only has to start that thread; the assertion is the
+# process exit status.
+
+require httpfs
+
+require-env HTTPFS_EXIT_TEARDOWN_URL
+
+query I
+SELECT content FROM read_text('${HTTPFS_EXIT_TEARDOWN_URL}');
+----
+exit teardown payload

@@ -2,6 +2,8 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <openssl/crypto.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -108,16 +110,33 @@ private:
 		}
 		curl_multi_wakeup(multi);
 		// This runs at static-destruction time, i.e. during process exit.
-		// Never join here: on Windows a thread's exit needs the loader lock,
+		// Never join blindly: on Windows a thread's exit needs the loader lock,
 		// which process teardown (and DLL detach) holds, so join() can block
-		// forever. Wait a bounded time for the loop to drain instead (bounded
-		// because the OS may already have terminated the thread), then detach.
+		// forever. Wait a bounded time for the loop to drain first (bounded
+		// because the OS may already have terminated the thread).
+		bool drained;
 		{
 			std::unique_lock<std::mutex> lk(exit_mu);
-			exit_cv.wait_for(lk, std::chrono::seconds(1), [&] { return loop_exited; });
+			drained = exit_cv.wait_for(lk, std::chrono::seconds(1), [&] { return loop_exited; });
 		}
 		if (thread.joinable()) {
+#ifdef _WIN32
 			thread.detach();
+#else
+			// loop_exited is set before the thread finishes exiting: its thread-local
+			// destructors still run afterwards, among them OpenSSL's per-thread cleanup
+			// (this thread ran every TLS transfer). Returning before they finish lets
+			// the process run OPENSSL_cleanup concurrently, and both free the same
+			// per-thread state: "double free or corruption" or a SIGSEGV at exit, after
+			// all work succeeded. Once the loop has drained the join is short and
+			// bounded, so wait for the thread to be fully gone. A loop that did not
+			// drain in time is still detached, as before.
+			if (drained) {
+				thread.join();
+			} else {
+				thread.detach();
+			}
+#endif
 		}
 		// The multi handle is deliberately leaked: curl_multi_cleanup would
 		// shut down live TLS connections after the TLS library may already
@@ -145,6 +164,13 @@ private:
 		// original implementation only drained the queue, leaving in-flight
 		// workers stuck on their condvars forever at process exit.
 		FailAllPending(CURLE_ABORTED_BY_CALLBACK);
+		// Release this thread's OpenSSL state (it ran every TLS transfer) now,
+		// while the destructor is still waiting, instead of in the thread-exit
+		// destructor OpenSSL registered: that one runs after loop_exited, and
+		// ran concurrently with OPENSSL_cleanup at process exit, both freeing
+		// the same per-thread handler list. After this the exit-time destructor
+		// has nothing left to free.
+		OPENSSL_thread_stop();
 		// Last touch of *this: the destructor may return (and the object be
 		// destroyed) as soon as it observes loop_exited.
 		std::lock_guard<std::mutex> lk(exit_mu);

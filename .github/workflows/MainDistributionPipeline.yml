@@ -129,3 +129,8 @@ jobs:
           build: python3 duckdb/scripts/ci/retry.py -- make relassert
           test: make unittest_relassert
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.24
+      # The curl multi dispatcher thread must not outlive exit(): detached, its
+      # OpenSSL thread-exit destructor raced OPENSSL_cleanup (double free /
+      # SIGSEGV after all tests passed). Deterministic via an LD_PRELOAD probe.
+      - name: Exit teardown regression
+        run: BUILD=relassert test/exit_teardown/run_exit_teardown_check.sh 3
